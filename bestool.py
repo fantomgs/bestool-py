@@ -380,7 +380,6 @@ class BESLink:
         """
         packet = []
         remain = 1
-        data_len = None
 
         while remain > 0:
             # print("Try read %d bytes" % rd_size)
@@ -393,11 +392,11 @@ class BESLink:
                     # print("Got 0xBE, received %d bytes, remain %d bytes" % (len(data), remain))
             else:
                 packet.extend(data)
-                remain -= len(data)
-                if len(packet) > 3 and data_len == None:
-                    data_len = packet[3]
-                    remain += data_len
-                    # print("Got data len %d, received %d bytes, remain %d bytes" % (data_len, len(data), remain))
+                if len(packet) > 3:
+                    remain = BESPacket.MINIMAL_PACKET_LEN + packet[3] - len(packet)
+                    # print("Got data len %d, received %d bytes, remain %d bytes" % (packet[3], len(data), remain))
+                else:
+                    remain -= len(data)
                 
         print("RX [", bytes(packet).hex(","), "] ", len(packet))
         sys.stdout.flush()
