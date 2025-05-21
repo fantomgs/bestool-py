@@ -26,33 +26,66 @@ class BESMessageTypes(Enum):
     FLASH_BURN_DATA = 0x62
 
 
+class BESPacket:
+    MINIMAL_PACKET_LEN = 5
+
+    magic = 0xBE
+    command = 0
+    sequence = 0
+    data_len = 0
+    checksum = 0
+    data = []    
+
+    def __init__(self):
+        pass
+    
+    def __init__(self, data):
+        self.packet = self.parse_packet(data)
+    
+    def parse_packet(self, data):
+        self.magic = data[0]
+        self.command = data[1]
+        self.sequence = data[2]
+        self.data_len = data[3]
+        self.checksum = data[4 + self.data_len]
+        self.data = []
+        if self.data_len > 0:
+            self.data = data[4:4 + self.data_len]
+        return self
+
+    
 class BESLink:
     """
     Wrapper class for communcations with the BES bootloader thing
     """
+    SYNC_MESSAGE = [0xBE, 0x50, 0x00, 0x01, 0x01, 0xEF]
 
     @classmethod
     def wait_for_sync(cls, serial_port: serial.Serial):
         print(f"Waiting for sync on {serial_port.name}")
+        print(f"Send SYNC request")
         sys.stdout.flush()
+        serial_port.write(cls.SYNC_MESSAGE)
         exit_time = datetime.now() + timedelta(seconds=30)
-        # Sync packet is {BE,50,00,03,00,00,01,ED}
+        # Sync packet from bootloader is {BE,50,00,03,00,00,01,ED}
         while datetime.now() < exit_time:
-            packet = cls._read_packet(serial_port)
-            if packet[1] == BESMessageTypes.SYNC.value:
-                print("Reached sync 1 sending validation")
+            data = cls._read_packet(serial_port)
+            packet = BESPacket(data).packet
+            if packet.command == BESMessageTypes.SYNC.value:
+                sync_code = packet.data[0] # 0 - bootloader just started, 2 - bootloader is already running
+                state = "unknown state"
+                if sync_code == 0:
+                    state = "started"
+                if sync_code == 2:
+                    state = "running"
+                print("Got SYNC reply (code 0x%02x - bootloader is %s)" % (sync_code, state))
+                if sync_code == 0:
+                    cls.wait_for_sync(serial_port)
+                else:
+                    if sync_code != 2:
+                        raise Exception("Unknown bootloader sync state 0x%02x" % sync_code)                    
                 sys.stdout.flush()
                 break
-        # Send out the confirmation message to stay in the bootloader
-        resp_data = [0xBE, 0x50, 0x00, 0x01, 0x01, 0xEF]
-        serial_port.write(resp_data)
-        while datetime.now() < exit_time:
-            packet = cls._read_packet(serial_port)
-            if packet[1] == BESMessageTypes.SYNC.value:
-                print("Programmer load stage 1")
-                sys.stdout.flush()
-                return
-        raise Exception("Timeout")
 
     @classmethod
     def load_programmer_blob(cls, serial_port: serial.Serial):
@@ -62,7 +95,7 @@ class BESLink:
         exit_time = datetime.now() + timedelta(seconds=30)
         cmd_prep_load_programmer = [
             0xBE,
-            0x53,
+            BESMessageTypes.START_PROGRAMMER.value,
             0x00,
             0x0C,
             0xDC,
@@ -346,7 +379,7 @@ class BESLink:
         Try and read a bes packet in the timeout
         """
         packet = []
-        packet_length = 3  # start at minimum
+        packet_length = BESPacket.MINIMAL_PACKET_LEN  # minimum packet len is 5 (header, command, sequence, dataLen, checksum)
 
         while len(packet) < packet_length:
             data = port.read(size=1)
@@ -354,12 +387,13 @@ class BESLink:
             if len(packet) == 0:
                 if data == 0xBE:
                     packet.append(data)
-            elif len(packet) == 2:
+            elif len(packet) == 3: # dataLen is located @ 0x3
+                # print("RX data len ", len(packet))
                 packet.append(data)
-                packet_length = cls._lookup_packet_length(packet[1], packet[2])
+                packet_length = data + BESPacket.MINIMAL_PACKET_LEN
             else:
                 packet.append(data)
-        print("RX", bytes(packet).hex(","), packet, len(packet))
+        print("RX [", bytes(packet).hex(","), "] ", len(packet))
         sys.stdout.flush()
         # Validate the checksum
         if not cls._validate_message_checksum(packet):
@@ -433,6 +467,16 @@ def monitor(port: str):
 def cli():
     pass
 
+
+@cli.command()
+@click.argument("port_name")
+def sync(port_name):
+    """"""
+    print(f"Enter to bootload mode @ {port_name}")
+    sys.stdout.flush()
+    port = serial.Serial(port=port_name, baudrate=BES_BAUD, timeout=30)
+    BESLink.wait_for_sync(port)
+    port.close()
 
 @cli.command()
 @click.argument("port_name")
