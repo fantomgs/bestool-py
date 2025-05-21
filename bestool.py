@@ -27,7 +27,7 @@ class BESMessageTypes(Enum):
 
 
 class BESPacket:
-    MINIMAL_PACKET_LEN = 5
+    MINIMAL_PACKET_LEN = 5 # minimum packet len is 5 (header, command, sequence, dataLen, checksum)
 
     magic = 0xBE
     command = 0
@@ -379,20 +379,26 @@ class BESLink:
         Try and read a bes packet in the timeout
         """
         packet = []
-        packet_length = BESPacket.MINIMAL_PACKET_LEN  # minimum packet len is 5 (header, command, sequence, dataLen, checksum)
+        remain = 1
+        data_len = None
 
-        while len(packet) < packet_length:
-            data = port.read(size=1)
-            data = data[0]
+        while remain > 0:
+            # print("Try read %d bytes" % rd_size)
+            data = port.read(size=remain)
+            # print("Got %d bytes" % len(data))
             if len(packet) == 0:
-                if data == 0xBE:
-                    packet.append(data)
-            elif len(packet) == 3: # dataLen is located @ 0x3
-                # print("RX data len ", len(packet))
-                packet.append(data)
-                packet_length = data + BESPacket.MINIMAL_PACKET_LEN
+                if data[0] == 0xBE:
+                    packet.extend(data)
+                    remain = BESPacket.MINIMAL_PACKET_LEN - len(data)
+                    # print("Got 0xBE, received %d bytes, remain %d bytes" % (len(data), remain))
             else:
-                packet.append(data)
+                packet.extend(data)
+                remain -= len(data)
+                if len(packet) > 3 and data_len == None:
+                    data_len = packet[3]
+                    remain += data_len
+                    # print("Got data len %d, received %d bytes, remain %d bytes" % (data_len, len(data), remain))
+                
         print("RX [", bytes(packet).hex(","), "] ", len(packet))
         sys.stdout.flush()
         # Validate the checksum
