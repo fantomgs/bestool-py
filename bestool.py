@@ -107,10 +107,7 @@ class BESLink:
             entry, param, sp, address = struct.unpack("<IIII", code_payload[0:16])
             size = len(code_payload)
 
-            crc32 = CRC32()
-            crc32.start()
-            crc32.update(code_payload)
-            crc = crc32.finalize()
+            crc = CRC32().compute(code_payload)
 
             print("Send code %d bytes @0x%08x, crc32 = 0x08%x, entry @ 0x%08x, param 0x%08x, sp @ 0x%08x" % (size, address, crc, entry, param, sp))
             sys.stdout.flush()
@@ -592,13 +589,18 @@ class CRC32:
 
     def start(self):
         self.value = 0xffffffff
+        return self
 
     def update(self, buf):
         for c in buf:
             self.value = self.table[(self.value ^ c) & 0xFF] ^ (self.value >> 8)
+        return self
 
     def finalize(self):
         return self.value ^ 0xffffffff
+
+    def compute(self, buf):
+        return self.start().update(buf).finalize()
 
 
 if __name__ == "__main__":
