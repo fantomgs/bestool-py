@@ -11,6 +11,7 @@ import zlib
 import click
 import time
 from datetime import datetime, timedelta
+import struct
 
 __author__ = "Ben V. Brown"
 BES_BAUD = 921600
@@ -102,7 +103,8 @@ class BESLink:
             code_payload = f.read()
             f.close()
 
-            address = 0x20002000
+            # address = 0x20002000
+            entry, param, sp, address = struct.unpack("<IIII", code_payload[0:16])
             size = len(code_payload)
 
             crc32 = CRC32()
@@ -110,7 +112,7 @@ class BESLink:
             crc32.update(code_payload)
             crc = crc32.finalize()
 
-            print("Send code %d bytes @0x%08x, crc32 = 0x08%x" % (size, address, crc))
+            print("Send code %d bytes @0x%08x, crc32 = 0x08%x, entry @ 0x%08x, param 0x%08x, sp @ 0x%08x" % (size, address, crc, entry, param, sp))
             sys.stdout.flush()
 
             code_info_msg = [
@@ -138,6 +140,7 @@ class BESLink:
             ]
             code_info_msg[-1] = cls._calculate_message_checksum(code_info_msg[0:-1])
             # Send code info message
+            print("Send CODE_INFO message")
             serial_port.write(code_info_msg)
             # wait for response
             while datetime.now() < exit_time:
@@ -146,15 +149,18 @@ class BESLink:
                     print("Resp OK to start code upload")
                     sys.stdout.flush()
                     break
+            print("Send CODE message")
             serial_port.write(cls.CODE_MESSAGE)
             serial_port.write(code_payload)
             # wait for response
             while datetime.now() < exit_time:
                 packet = cls._read_packet(serial_port)
+                #TODO: catch error: in case of incorrect CODE CRC we get resync message RX [ be,50,01,03,00,00,01,ec ]  8
                 if packet[1] == BESMessageTypes.CODE.value:
                     print("Resp OK to loading code")
                     sys.stdout.flush()
-                    break            
+                    break
+            print("Send RUN message")
             serial_port.write(cls.RUN_MESSAGE)
             while datetime.now() < exit_time:
                 packet = cls._read_packet(serial_port)
