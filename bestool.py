@@ -18,6 +18,10 @@ BES_BAUD = 921600
 
 
 class BESMessageTypes(Enum):
+    SYS = 0x00
+    READ = 0x01
+    WRITE = 0x02
+    BULK_READ = 0x03
     SYNC = 0x50
     CODE_INFO = 0x53
     CODE = 0x54
@@ -107,7 +111,7 @@ class BESLink:
             entry, param, sp, address = struct.unpack("<IIII", code_payload[0:16])
             size = len(code_payload)
 
-            crc = CRC32().compute(code_payload)
+            crc = zlib.crc32(code_payload)
 
             print("Send code %d bytes @0x%08x, crc32 = 0x08%x, entry @ 0x%08x, param 0x%08x, sp @ 0x%08x" % (size, address, crc, entry, param, sp))
             sys.stdout.flush()
@@ -575,32 +579,6 @@ def list_ports():
     for port in serial.tools.list_ports.comports():
         print(port)
     sys.stdout.flush()
-
-class CRC32:
-    def __init__(self):
-        self.table = []
-        self.value = None
-
-        for i in range(256):
-            v = i
-            for j in range(8):
-                v = (0xEDB88320 ^ (v >> 1)) if(v & 1) == 1 else (v >> 1)
-            self.table.append(v)
-
-    def start(self):
-        self.value = 0xffffffff
-        return self
-
-    def update(self, buf):
-        for c in buf:
-            self.value = self.table[(self.value ^ c) & 0xFF] ^ (self.value >> 8)
-        return self
-
-    def finalize(self):
-        return self.value ^ 0xffffffff
-
-    def compute(self, buf):
-        return self.start().update(buf).finalize()
 
 
 if __name__ == "__main__":
