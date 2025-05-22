@@ -18,8 +18,9 @@ BES_BAUD = 921600
 
 class BESMessageTypes(Enum):
     SYNC = 0x50
-    START_PROGRAMMER = 0x53
-    PROGRAMMER_RUNNING = 0x54
+    CODE_INFO = 0x53
+    CODE = 0x54
+    RUN = 0x55
     PROGRAMMER_INIT = 0x60
     FLASH_COMMAND = 0x65
     ERASE_BURN_SART = 0x61
@@ -58,7 +59,9 @@ class BESLink:
     """
     Wrapper class for communcations with the BES bootloader thing
     """
-    SYNC_MESSAGE = [0xBE, 0x50, 0x00, 0x01, 0x01, 0xEF]
+    SYNC_MESSAGE    = [0xBE, BESMessageTypes.SYNC.value, 0x00, 0x01, 0x01, 0xEF]
+    CODE_MESSAGE    = [0xBE, BESMessageTypes.CODE.value, 0xA2, 0x03, 0x00, 0x00, 0x00, 0x48]
+    RUN_MESSAGE     = [0xBE, BESMessageTypes.RUN.value, 0x01, 0x00, 0xEB]
 
     @classmethod
     def wait_for_sync(cls, serial_port: serial.Serial):
@@ -88,57 +91,78 @@ class BESLink:
                 break
 
     @classmethod
-    def load_programmer_blob(cls, serial_port: serial.Serial):
+    def load_code_blob(cls, serial_port: serial.Serial):
         """
-        Loading in the programmer blob
+        Loading in the code blob
         """
         exit_time = datetime.now() + timedelta(seconds=30)
-        cmd_prep_load_programmer = [
-            0xBE,
-            BESMessageTypes.START_PROGRAMMER.value,
-            0x00,
-            0x0C,
-            0xDC,
-            0x05,
-            0x01,
-            0x20,
-            0xDC,
-            0x32,
-            0x01,
-            0x00,
-            0xC0,
-            0xA7,
-            0xE8,
-            0x0C,
-            0x76,
-        ]
-        # Send the prep command
-        serial_port.write(cmd_prep_load_programmer)
-        # wait for response
-        while datetime.now() < exit_time:
-            packet = cls._read_packet(serial_port)
-            if packet[1] == BESMessageTypes.START_PROGRAMMER.value:
-                print("Resp OK to start programmer load")
-                sys.stdout.flush()
-                break
-        with open("programmer.bin", "r+b") as f:
-            programmer_payload = f.read()
-            serial_port.write(programmer_payload)
-        # wait for response
-        while datetime.now() < exit_time:
-            packet = cls._read_packet(serial_port)
-            if packet[1] == BESMessageTypes.PROGRAMMER_RUNNING.value:
-                print("Resp to loading the programmer payload message")
-                sys.stdout.flush()
-                break
-        cmd_programmer_start = [0xBE, 0x55, 0x01, 0x00, 0xEB]
-        serial_port.write(cmd_programmer_start)
-        while datetime.now() < exit_time:
-            packet = cls._read_packet(serial_port)
-            if packet[1] == BESMessageTypes.PROGRAMMER_INIT.value:
-                print("Response ok to programmer start")
-                sys.stdout.flush()
-                break
+        # code_addr & 0x3 == 0 && code_len > 0 && code_addr >= 0x20001950 && code_len + code_addr < 0x2003F000
+
+        with open("code.bin", "r+b") as f:
+            code_payload = f.read()
+            f.close()
+
+            address = 0x20002000
+            size = len(code_payload)
+
+            crc32 = CRC32()
+            crc32.start()
+            crc32.update(code_payload)
+            crc = crc32.finalize()
+
+            print("Send code %d bytes @0x%08x, crc32 = 0x08%x" % (size, address, crc))
+            sys.stdout.flush()
+
+            code_info_msg = [
+                0xBE,
+                BESMessageTypes.CODE_INFO.value,
+                0x00,
+                0x0C,
+                # code address
+                (address >> 0) & 0xff,
+                (address >> 8) & 0xff,
+                (address >> 16) & 0xff,
+                (address >> 24) & 0xff,
+                # code size
+                (size >> 0) & 0xff,
+                (size >> 8) & 0xff,
+                (size >> 16) & 0xff,
+                (size >> 24) & 0xff,
+                # code crc32
+                (crc >> 0) & 0xff,
+                (crc >> 8) & 0xff,
+                (crc >> 16) & 0xff,
+                (crc >> 24) & 0xff,
+                # cksum
+                0x00,
+            ]
+            code_info_msg[-1] = cls._calculate_message_checksum(code_info_msg[0:-1])
+            # Send code info message
+            serial_port.write(code_info_msg)
+            # wait for response
+            while datetime.now() < exit_time:
+                packet = cls._read_packet(serial_port)
+                if packet[1] == BESMessageTypes.CODE_INFO.value:
+                    print("Resp OK to start code upload")
+                    sys.stdout.flush()
+                    break
+            serial_port.write(cls.CODE_MESSAGE)
+            serial_port.write(code_payload)
+            # wait for response
+            while datetime.now() < exit_time:
+                packet = cls._read_packet(serial_port)
+                if packet[1] == BESMessageTypes.CODE.value:
+                    print("Resp OK to loading code")
+                    sys.stdout.flush()
+                    break            
+            serial_port.write(cls.RUN_MESSAGE)
+            while datetime.now() < exit_time:
+                packet = cls._read_packet(serial_port)
+                if packet[1] == BESMessageTypes.RUN.value:
+                    #TODO: catch error be 54 01 01 24 c7 - ERR_CODE_INFO_MISSING
+                    print("Resp OK to starting code")
+                    sys.stdout.flush()
+                    break
 
     @classmethod
     def read_flash_info(cls, serial_port: serial.Serial):
@@ -414,9 +438,9 @@ class BESLink:
 
         if packet_id1 == BESMessageTypes.SYNC.value:
             return 8
-        if packet_id1 == BESMessageTypes.START_PROGRAMMER.value:
+        if packet_id1 == BESMessageTypes.CODE_INFO.value:
             return 6
-        if packet_id1 == BESMessageTypes.PROGRAMMER_RUNNING.value:
+        if packet_id1 == BESMessageTypes.CODE_SEND.value:
             return 6
         if packet_id1 == BESMessageTypes.PROGRAMMER_INIT.value:
             return 11
@@ -485,13 +509,24 @@ def sync(port_name):
 
 @cli.command()
 @click.argument("port_name")
+def code(port_name):
+    """"""
+    print(f"Querying for info @ {port_name}")
+    sys.stdout.flush()
+    port = serial.Serial(port=port_name, baudrate=BES_BAUD, timeout=30)
+    BESLink.wait_for_sync(port)
+    BESLink.load_code_blob(port)
+    port.close()
+
+@cli.command()
+@click.argument("port_name")
 def info(port_name):
     """"""
     print(f"Querying for info @ {port_name}")
     sys.stdout.flush()
     port = serial.Serial(port=port_name, baudrate=BES_BAUD, timeout=30)
     BESLink.wait_for_sync(port)
-    BESLink.load_programmer_blob(port)
+    BESLink.load_code_blob(port)
     BESLink.read_flash_info(port)
     port.close()
 
@@ -505,7 +540,7 @@ def program(filepath, port_name):
     sys.stdout.flush()
     port = serial.Serial(port=port_name, baudrate=BES_BAUD, timeout=30)
     BESLink.wait_for_sync(port)
-    BESLink.load_programmer_blob(port)
+    BESLink.load_code_blob(port)
     BESLink.read_flash_info(port)
     BESLink.run_get_cfgdata(port)
     BESLink.program_binary_file(port, filepath)
@@ -521,7 +556,7 @@ def program_watch(filepath, port_name):
     sys.stdout.flush()
     port = serial.Serial(port=port_name, baudrate=BES_BAUD, timeout=30)
     BESLink.wait_for_sync(port)
-    BESLink.load_programmer_blob(port)
+    BESLink.load_code_blob(port)
     BESLink.read_flash_info(port)
     BESLink.run_get_cfgdata(port)
     BESLink.program_binary_file(port, filepath)
@@ -537,6 +572,27 @@ def list_ports():
     for port in serial.tools.list_ports.comports():
         print(port)
     sys.stdout.flush()
+
+class CRC32:
+    def __init__(self):
+        self.table = []
+        self.value = None
+
+        for i in range(256):
+            v = i
+            for j in range(8):
+                v = (0xEDB88320 ^ (v >> 1)) if(v & 1) == 1 else (v >> 1)
+            self.table.append(v)
+
+    def start(self):
+        self.value = 0xffffffff
+
+    def update(self, buf):
+        for c in buf:
+            self.value = self.table[(self.value ^ c) & 0xFF] ^ (self.value >> 8)
+
+    def finalize(self):
+        return self.value ^ 0xffffffff
 
 
 if __name__ == "__main__":
