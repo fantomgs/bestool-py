@@ -34,20 +34,20 @@ No special data operation
 
 ## Loading programmer blob
 
-### CODE? Start Programmer {BE,53,00,0C,DC,05,01,20,DC,32,01,00,C0,A7,E8,0C,76} [Tx]
+### CODE_INFO {BE,53,00,0C,DC,05,01,20,DC,32,01,00,C0,A7,E8,0C,76} [Tx]
 
 Address 0x200105dc
 Length 78556 (0x0132DC)
 
-### CODE? Start Programmer reply {BE,53,00,01,00,ED} [Rx]
+### CODE_INFO reply {BE,53,00,01,00,ED} [Rx]
 
-### CODE Load? message {....} [Tx]
+### CODE Load message {....} [Tx]
 
-Very long message, suspect its programmer payload
+Send programmer payload
 
-### CODE Load? Confirmation {BE,54,A2,01,20,2A} [Rx]
+### CODE Load Confirmation {BE,54,A2,01,20,2A} [Rx]
 
-### CODE Run command? {BE,55,01,00,EB} [Tx]
+### CODE Run command {BE,55,01,00,EB} [Tx]
 
 ### Programmer running / Programmer version {BE,60,00,06,03,01,00,90,00,00,47} [Rx]
 
