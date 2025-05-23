@@ -21,16 +21,16 @@ class BESMessageTypes(Enum):
     SYS                         = 0x00
     READ                        = 0x01
     WRITE                       = 0x02
-    BULK_READ                   = 0x03
-    SYNC                        = 0x50
-    CODE_INFO                   = 0x53
+    BULK_READ                   = 0x03 # bl+, pg+
+    SYNC                        = 0x50 # bl+, pg-
+    CODE_INFO                   = 0x53 # bl+, pg-
     CODE                        = 0x54
     RUN                         = 0x55
     SECTOR_SIZE                 = 0x60 # ok
     ERASE_BURN_START            = 0x61 # ok
     ERASE_BURN_DATA             = 0x62
     BURN_DATA                   = 0x64
-    FLASH_CMD                   = 0x65 # ok
+    FLASH_CMD                   = 0x65 # ok, bl-, pg+
     GET_SECTOR_INFO             = 0x66 # ok
     SEC_REG_ERASE_BURN_START    = 0x67 # ok
     SEC_REG_ERASE_BURN_DATA     = 0x68
@@ -50,6 +50,14 @@ class BESFlashCmdTypes(Enum):
     ENABLE_REMAP      = 0x51 # ok
     DISABLE_REMAP     = 0x52 # ok
 
+
+class BESSysCmdTypes(Enum):
+    REBOOT          = 0xF1
+    SHUTDOWN        = 0xF2
+    FLASH_BOOT      = 0xF3
+    SET_BOOTMODE    = 0xE1
+    CLR_BOOTMODE    = 0xE2
+    GET_BOOTMODE    = 0xE3
 
 
 class BESPacket:
@@ -91,6 +99,7 @@ class BESLink:
     serial_port: serial.Serial
     wr_seq = 0
     rd_seq = 0
+    programmer_running = False
 
     @classmethod
     def __init__(cls, serial_port: serial.Serial):
@@ -126,6 +135,7 @@ class BESLink:
                 if sync_code == 0:
                     cls.wait_for_sync()
                 elif sync_code == 0xf: # after 0xf code programmer sends msg 0x60(SECTOR_SIZE) as sign of resync
+                    cls.programmer_running = True
                     packet = cls._read_packet()
                     if packet.msg_type == BESMessageTypes.SECTOR_SIZE.value:
                         ver, sector_size = struct.unpack("<HI", packet.data)
@@ -203,6 +213,7 @@ class BESLink:
                         raise Exception(f"Resp NOT OK to start code upload, error 0x{packet.data[0]:02x}{desc}")
                 # it seems like programmer returns msg_type 0x60 for every unsupported sended msg_type value
                 elif packet.msg_type == BESMessageTypes.SECTOR_SIZE.value:
+                    cls.programmer_running = True
                     ver, sector_size = struct.unpack("<HI", packet.data)
                     print(f"Resp NOT OK - programmer already running, ver 0x%04x, sector_size 0x%08x" % (ver, sector_size))
                     sys.stdout.flush()
@@ -219,7 +230,7 @@ class BESLink:
                 #TODO: catch error: in case of incorrect CODE CRC bootloader silently (without sending 0x54 reply with error code) send resync message RX [ be,50,01,03,00,00,01,ec ]  8
                 #TODO: catch error: be 54 01 01 24 c7 - ERR_CODE_INFO_MISSING
                 if packet.msg_type == BESMessageTypes.CODE.value:
-                    if packet.data[0] == 0:
+                    if packet.data[0] == 0x20:
                         print("Resp OK to loading code")
                         sys.stdout.flush()
                         break
@@ -237,6 +248,7 @@ class BESLink:
                 # programmer blob never return (loop forever)? exit only by reboot
                 if packet.msg_type == BESMessageTypes.RUN.value:
                     if packet.data[0] == 0:
+                        cls.programmer_running = False
                         ret_code = struct.unpack("<I", packet.data[1:5])
                         print(f"Resp OK run code done, ret 0x{ret_code:08x}")
                         sys.stdout.flush()
@@ -244,9 +256,11 @@ class BESLink:
                     else:
                         raise Exception(f"Run code exit with error 0x{packet.data[0]:02x}")
                 elif packet.msg_type == BESMessageTypes.SECTOR_SIZE.value:
+                    cls.programmer_running = True
                     ver, sector_size = struct.unpack("<HI", packet.data)
                     print(f"Resp OK - programmer sucessfully running, ver 0x{ver:04x}, sector_size 0x{sector_size:08x}")
                     sys.stdout.flush()
+                    break
                 else:
                     raise Exception(f"Run code failed: bad reply msg_type {packet.msg_type:02x}")
 
@@ -282,13 +296,29 @@ class BESLink:
         """
         exit_time = datetime.now() + timedelta(seconds=30)
 
-        msg_sys_poll_1 = [0xBE, 0x03, 0x05, 0x08, 0x00, 0xE0, 0x0F, 0x3C, 0x00, 0x10, 0x00, 0x00, 0xF6]
+        msg_sys_poll_1 = [
+            0xBE,
+            BESMessageTypes.BULK_READ.value,
+            0x05,
+            0x08,
+            0x00, 0xE0, 0x0F, 0x3C, # read from 0x3C0FE000 (flash offset 0xFE000) (why? there is nothing. should be 0xFFE000 in for some data from bes_reserved?)
+            0x00, 0x10, 0x00, 0x00, # size 0x1000
+            0xF6
+        ]
         cls._write_paket_raw(msg_sys_poll_1)
 
         time.sleep(0.1)
         cls.serial_port.reset_input_buffer()
 
-        msg_sys_poll_2 = [0xBE, 0x03, 0x06, 0x08, 0x00, 0xF0, 0x0F, 0x3C, 0x00, 0x10, 0x00, 0x00, 0xE5]
+        msg_sys_poll_2 = [
+            0xBE,
+            0x03,
+            0x06,
+            0x08,
+            0x00, 0xF0, 0x0F, 0x3C, # read at 0x3C0FF000 (flash offset 0xFF000) (why? factory is located at 0xFFF000)
+            0x00, 0x10, 0x00, 0x00,
+            0xE5
+        ]
         cls._write_paket_raw(msg_sys_poll_2)
 
         time.sleep(0.1)
@@ -420,6 +450,123 @@ class BESLink:
                     sys.stdout.flush()
                     return
         raise Exception("Timed out finalising")
+    
+    @classmethod
+    def dump_to_file(cls, s_address, s_size, filename: str):
+        """
+        Bulk dump data from any device's address to file
+
+        """
+        if str.lower(s_address[:2]) == "0x":
+            address = int(s_address, 16)
+        else:
+            address = int(s_address)
+        if str.lower(s_size[:2]) == "0x":
+            size = int(s_size, 16)
+        else:
+            size = int(s_size)
+        with open(filename, "wb") as f:
+            if cls.programmer_running:
+                resync_at = datetime.now() + timedelta(seconds=10)
+            chunk_size = 0x8000//2
+            if chunk_size > size:
+                chunk_size = size
+            remain = size
+            while remain > 0:
+                if remain < chunk_size:
+                    chunk_size = remain
+                data = cls.read_chunk(address, chunk_size)
+                f.write(data)
+                received = len(data)
+                address += received
+                remain -= received
+                if received != chunk_size:
+                    print(f"Expected {chunk_size}, {received} got")
+                print(f"Total {(size-remain)} of {size} ({((size-remain)/size*100):.0f}%)")
+                # time.sleep(0.01) # give chance to mcu to resets wdt?
+                # dump may fails on long ops, so try to reinit programmer state (flush buffers, reset timouts, etc.)
+                # seems like this is not needed for bootloader but for programmer only
+                if cls.programmer_running and datetime.now() >= resync_at:
+                    cls.wait_for_sync()
+                    resync_at = datetime.now() + timedelta(seconds=10)
+            f.close()
+
+    
+    @classmethod
+    def read_chunk(cls, address, size) -> bytearray:
+        ret = bytearray()
+        bulk_read_msg = [
+            (address >> 0) & 0xFF,
+            (address >> 8) & 0xFF,
+            (address >> 16) & 0xFF,
+            (address >> 24) & 0xFF,
+            (size >> 0) & 0xFF,
+            (size >> 8) & 0xFF,
+            (size >> 16) & 0xFF,
+            (size >> 24) & 0xFF,
+        ]
+        cls._write_paket_raw_data(BESMessageTypes.BULK_READ, bulk_read_msg)
+        exit_time = datetime.now() + timedelta(seconds=10)
+
+        while datetime.now() < exit_time:
+            packet = cls._read_packet()
+            if packet.msg_type == BESMessageTypes.BULK_READ.value:
+                print(f"Bulk read returned {packet.data.hex(" ")}")
+                sys.stdout.flush()
+                if packet.data[0] != 0x00:
+                    raise Exception(f"Bad return code {packet.data[0]:02x}")
+                i = address
+                remain = size
+                chunk_size = 16
+                while remain > 0:
+                    data = cls.serial_port.read(size=chunk_size)
+                    remain -= len(data)
+                    # print(f"{i:08x}: {data.hex(" ")} [{remain}]")
+                    i += len(data)
+                    ret.extend(data)
+                # print("Done")
+                break
+            else:
+                raise Exception("Unexpected msg_type {packet.msg_type:02x} during BULK_READ")
+        return ret
+
+    @classmethod
+    def reboot(cls, address, size) -> bytearray:
+        ret = bytearray()
+        bulk_read_msg = [
+            (address >> 0) & 0xFF,
+            (address >> 8) & 0xFF,
+            (address >> 16) & 0xFF,
+            (address >> 24) & 0xFF,
+            (size >> 0) & 0xFF,
+            (size >> 8) & 0xFF,
+            (size >> 16) & 0xFF,
+            (size >> 24) & 0xFF,
+        ]
+        cls._write_paket_raw_data(BESMessageTypes.BULK_READ, bulk_read_msg)
+        exit_time = datetime.now() + timedelta(seconds=10)
+
+        while datetime.now() < exit_time:
+            packet = cls._read_packet()
+            if packet.msg_type == BESMessageTypes.BULK_READ.value:
+                print(f"Bulk read returned {packet.data.hex(" ")}")
+                sys.stdout.flush()
+                if packet.data[0] != 0x00:
+                    raise Exception(f"Bad return code {packet.data[0]:02x}")
+                i = address
+                remain = size
+                chunk_size = 16
+                while remain > 0:
+                    data = cls.serial_port.read(size=chunk_size)
+                    remain -= len(data)
+                    # print(f"{i:08x}: {data.hex(" ")} [{remain}]")
+                    i += len(data)
+                    ret.extend(data)
+                # print("Done")
+                break
+            else:
+                raise Exception("Unexpected msg_type {packet.msg_type:02x} during BULK_READ")
+        return ret
 
     @classmethod
     def _wait_for_programming_ack(cls) -> int:
@@ -653,7 +800,7 @@ def program(filepath, port_name):
     port = serial.Serial(port=port_name, baudrate=BES_BAUD, timeout=30)
     BESLink.run_programmer(port)
     BESLink.read_flash_info(port)
-    BESLink.run_get_cfgdata(port)
+    # BESLink.run_get_cfgdata(port)
     BESLink.program_binary_file(port, filepath)
     port.close()
 
@@ -668,10 +815,29 @@ def program_watch(filepath, port_name):
     port = serial.Serial(port=port_name, baudrate=BES_BAUD, timeout=30)
     BESLink.run_programmer(port)
     BESLink.read_flash_info(port)
-    BESLink.run_get_cfgdata(port)
+    # BESLink.run_get_cfgdata(port)
     BESLink.program_binary_file(port, filepath)
     port.close()
     monitor(port_name)
+
+@cli.command()
+@click.argument("port_name")
+@click.option("-o", "-w", "filepath")
+@click.option("-a", "address")
+@click.option("-s", "size")
+@click.option("-p", "--use-programmer", is_flag=True)
+def dump(port_name, address, size, filepath, use_programmer):
+    """"""
+    print(f"Dumping {size} from {address} to {filepath} from device @ {port_name}")
+    sys.stdout.flush()
+    port = serial.Serial(port=port_name, baudrate=BES_BAUD, timeout=30)
+    bes = BESLink(port)
+    bes.wait_for_sync()
+    if use_programmer:
+        bes.run_programmer() # doesn't need a programmer to dump smthng
+        bes.read_flash_info() # unsupported without programmer
+    bes.dump_to_file(address, size, filepath)
+    port.close()
 
 
 @cli.command()
