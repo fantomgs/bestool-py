@@ -52,12 +52,12 @@ class BESFlashCmdTypes(Enum):
 
 
 class BESSysCmdTypes(Enum):
-    REBOOT          = 0xF1
-    SHUTDOWN        = 0xF2
-    FLASH_BOOT      = 0xF3
-    SET_BOOTMODE    = 0xE1
-    CLR_BOOTMODE    = 0xE2
-    GET_BOOTMODE    = 0xE3
+    REBOOT          = 0xF1 # no args
+    SHUTDOWN        = 0xF2 # no args
+    FLASH_BOOT      = 0xF3 # no args
+    SET_BOOTMODE    = 0xE1 # arg 4 bytes
+    CLR_BOOTMODE    = 0xE2 # arg 4 bytes
+    GET_BOOTMODE    = 0xE3 # no args, return 4 bytes
 
 
 class BESPacket:
@@ -531,42 +531,30 @@ class BESLink:
         return ret
 
     @classmethod
-    def reboot(cls, address, size) -> bytearray:
-        ret = bytearray()
-        bulk_read_msg = [
-            (address >> 0) & 0xFF,
-            (address >> 8) & 0xFF,
-            (address >> 16) & 0xFF,
-            (address >> 24) & 0xFF,
-            (size >> 0) & 0xFF,
-            (size >> 8) & 0xFF,
-            (size >> 16) & 0xFF,
-            (size >> 24) & 0xFF,
-        ]
-        cls._write_paket_raw_data(BESMessageTypes.BULK_READ, bulk_read_msg)
-        exit_time = datetime.now() + timedelta(seconds=10)
+    def reboot(cls):
+        cls._write_paket_raw_data(BESMessageTypes.SYS, [ BESSysCmdTypes.REBOOT.value ])
+        print("Send REBOOT request...")
+        packet = cls._read_packet()
+        if packet.msg_type == BESMessageTypes.SYS.value:
+            print(f"REBOOT reply {packet.data.hex(" ")}")
+            sys.stdout.flush()
+            if packet.data[0] != 0x00:
+                raise Exception(f"Bad return code {packet.data[0]:02x}")
+        else:
+            raise Exception("Unexpected msg_type {packet.msg_type:02x} in REBOOT reply")
 
-        while datetime.now() < exit_time:
-            packet = cls._read_packet()
-            if packet.msg_type == BESMessageTypes.BULK_READ.value:
-                print(f"Bulk read returned {packet.data.hex(" ")}")
-                sys.stdout.flush()
-                if packet.data[0] != 0x00:
-                    raise Exception(f"Bad return code {packet.data[0]:02x}")
-                i = address
-                remain = size
-                chunk_size = 16
-                while remain > 0:
-                    data = cls.serial_port.read(size=chunk_size)
-                    remain -= len(data)
-                    # print(f"{i:08x}: {data.hex(" ")} [{remain}]")
-                    i += len(data)
-                    ret.extend(data)
-                # print("Done")
-                break
-            else:
-                raise Exception("Unexpected msg_type {packet.msg_type:02x} during BULK_READ")
-        return ret
+    @classmethod
+    def shutdown(cls):
+        cls._write_paket_raw_data(BESMessageTypes.SYS, [ BESSysCmdTypes.SHUTDOWN.value ])
+        print("Send SHUTDOWN request...")
+        packet = cls._read_packet()
+        if packet.msg_type == BESMessageTypes.SYS.value:
+            print(f"SHUTDOWN reply {packet.data.hex(" ")}")
+            sys.stdout.flush()
+            if packet.data[0] != 0x00:
+                raise Exception(f"Bad return code {packet.data[0]:02x}")
+        else:
+            raise Exception("Unexpected msg_type {packet.msg_type:02x} in SHUTDOWN reply")
 
     @classmethod
     def _wait_for_programming_ack(cls) -> int:
@@ -834,11 +822,41 @@ def dump(port_name, address, size, filepath, use_programmer):
     bes = BESLink(port)
     bes.wait_for_sync()
     if use_programmer:
-        bes.run_programmer() # doesn't need a programmer to dump smthng
+        bes.run_programmer() # doesn't need a programmer to dump smthng, but ~x2 slow
         bes.read_flash_info() # unsupported without programmer
     bes.dump_to_file(address, size, filepath)
     port.close()
 
+@cli.command()
+@click.argument("port_name")
+@click.option("-s", "--sync", is_flag=True)
+@click.option("-r", "--resync", is_flag=True)
+def reboot(port_name, sync, resync):
+    """"""
+    print(f"Do reboot device @ {port_name}")
+    sys.stdout.flush()
+    port = serial.Serial(port=port_name, baudrate=BES_BAUD, timeout=30)
+    bes = BESLink(port)
+    if sync:
+        bes.wait_for_sync()
+    bes.reboot()
+    if resync:
+        bes.wait_for_sync()
+    port.close()
+
+@cli.command()
+@click.argument("port_name")
+@click.option("-s", "--sync", is_flag=True)
+def shutdown(port_name, sync):
+    """"""
+    print(f"Do shutdown device @ {port_name}")
+    sys.stdout.flush()
+    port = serial.Serial(port=port_name, baudrate=BES_BAUD, timeout=30)
+    bes = BESLink(port)
+    if sync:
+        bes.wait_for_sync()
+    bes.shutdown()
+    port.close()
 
 @cli.command()
 def list_ports():
