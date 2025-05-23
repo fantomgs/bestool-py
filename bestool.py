@@ -26,7 +26,7 @@ class BESMessageTypes(Enum):
     CODE_INFO                   = 0x53
     CODE                        = 0x54
     RUN                         = 0x55
-    SECTOR_SIZE                 = 0x60
+    SECTOR_SIZE                 = 0x60 # ok
     ERASE_BURN_START            = 0x61 # ok
     ERASE_BURN_DATA             = 0x62
     BURN_DATA                   = 0x64
@@ -74,9 +74,9 @@ class BESPacket:
         self.sequence = data[2]
         self.data_len = data[3]
         self.checksum = data[4 + self.data_len]
-        self.data = []
+        self.data = bytearray()
         if self.data_len > 0:
-            self.data = data[4:4 + self.data_len]
+            self.data.extend(data[4:4 + self.data_len])
         return self
 
     
@@ -102,7 +102,7 @@ class BESLink:
     @classmethod
     def wait_for_sync(cls) -> str:
         print(f"Waiting for sync on {cls.serial_port.name}")
-        print(f"Send SYNC request")
+        print("Send SYNC request")
         sys.stdout.flush()
         cls._write_paket_raw(cls.SYNC_MESSAGE)
         exit_time = datetime.now() + timedelta(seconds=30)
@@ -119,15 +119,16 @@ class BESLink:
                     state = "bootloader running"
                 if sync_code == 0xf:
                     state = "programmer running"
-                print("Got SYNC reply (code 0x%02x - %s)" % (sync_code, state))
+                print(f"Got SYNC reply (code 0x{sync_code:02x} - {state})")
                 if sync_code == 0:
                     cls.wait_for_sync()
-                elif sync_code == 0xf: # after sync reply 
+                elif sync_code == 0xf: # after sync reply programmer sends 0x60 msg SECTOR_SIZE
                     packet = cls._read_packet()
-                    if packet.msg_type == BESMessageTypes.GET_SECTOR_INFO.value:
-                        print("Got SYNC reply (code 0x%02x - %s)" % (sync_code, state))
+                    if packet.msg_type == BESMessageTypes.SECTOR_SIZE.value:
+                        ver, sector_size = struct.unpack("<HI", packet.data)
+                        print(f"Got SECTOR_SIZE reply, ver 0x{ver:04x}, sector_size 0x{sector_size:08x}")
                 elif sync_code != 2:
-                    raise Exception("Unknown sync state 0x%02x" % sync_code)                    
+                    raise Exception(f"Unknown sync state 0x{sync_code:02x}")                    
                 sys.stdout.flush()
                 break
         return state
@@ -146,6 +147,7 @@ class BESLink:
         exit_time = datetime.now() + timedelta(seconds=30)
         # code_addr & 0x3 == 0 && code_len > 0 && code_addr >= 0x20001950 && code_len + code_addr < 0x2003F000
 
+        #TODO: autodetect payload is raw or formatted by checking header
         # with open("../romdumper/main.bin", "r+b") as f:
         with open("../romdumper/programmer2001.code.bin", "r+b") as f:
             code_payload = f.read()
@@ -153,11 +155,13 @@ class BESLink:
 
             # address = 0x20002000
             entry, param, sp, address = struct.unpack("<IIII", code_payload[0:16])
+            if entry == 0xBE57EC1C:
+                raise Exception("Use payload from formatted code file is not supported yet")
             size = len(code_payload)
 
             crc = zlib.crc32(code_payload)
 
-            print("Send code %d bytes @0x%08x, crc32 = 0x08%x, entry @ 0x%08x, param 0x%08x, sp @ 0x%08x" % (size, address, crc, entry, param, sp))
+            print(f"Paylod info: size {size}, load address 0x{address:08x}, crc32 0x{crc:08x}, entry 0x{entry:08x}, param 0x{param:08x}, sp 0x{sp:08x}")
             sys.stdout.flush()
 
             code_info_msg_data = [
@@ -185,15 +189,23 @@ class BESLink:
             while datetime.now() < exit_time:
                 packet = cls._read_packet()
                 if packet.msg_type == BESMessageTypes.CODE_INFO.value:
-                    print("Resp OK to start code upload")
-                    sys.stdout.flush()
-                    break
+                    if packet.data[0] == 0:
+                        print("Resp OK to start code upload")
+                        sys.stdout.flush()
+                        break
+                    else:
+                        desc = ""
+                        if packet.data[0] == 0xf:
+                            desc = " - code is already running"
+                        raise Exception(f"Resp NOT OK to start code upload, error 0x{packet.data[0]:02x}{desc}")
                 # it seems like programmer returns msg_type 0x60 for every unsupported sended msg_type value
-                if packet.msg_type == BESMessageTypes.SECTOR_SIZE.value:
-                    ver, sector_size = struct.unpack("<H<I", packet.data)
-                    print("Resp NOT OK - programmer already running, ver 0x%04x, sector_size 0x%08x" % (ver, sector_size))
+                elif packet.msg_type == BESMessageTypes.SECTOR_SIZE.value:
+                    ver, sector_size = struct.unpack("<HI", packet.data)
+                    print(f"Resp NOT OK - programmer already running, ver 0x%04x, sector_size 0x%08x" % (ver, sector_size))
                     sys.stdout.flush()
                     raise Exception("Code load failed - programmer already running")
+                else:
+                    raise Exception(f"Code load failed - unknown msg_type in reply 0x{packet.msg_type:02x}")
             print("Send CODE")
             sys.stdout.flush()
             cls._write_paket_raw(cls.CODE_MESSAGE)
@@ -209,9 +221,9 @@ class BESLink:
                         sys.stdout.flush()
                         break
                     else:
-                        raise Exception("Load code failed: error %02x" % packet.data[0])
+                        raise Exception(f"Load code failed: error 0x{packet.data[0]:02x}")
                 else:
-                    raise Exception("Load code failed: bad reply msg_type %02x" % packet.msg_type)
+                    raise Exception(f"Load code failed: bad reply msg_type 0x{packet.msg_type:02x}")
             print("Send RUN message")
             sys.stdout.flush()
             cls._write_paket_raw(cls.RUN_MESSAGE)
@@ -223,17 +235,17 @@ class BESLink:
                 if packet.msg_type == BESMessageTypes.RUN.value:
                     if packet.data[0] == 0:
                         ret_code = struct.unpack("<I", packet.data[1:5])
-                        print("Resp OK run code done, ret 0x%08x" % ret_code)
+                        print(f"Resp OK run code done, ret 0x{ret_code:08x}")
                         sys.stdout.flush()
                         break
                     else:
-                        raise Exception("Run code exit with error %02x" % packet.data[0])
+                        raise Exception(f"Run code exit with error 0x{packet.data[0]:02x}")
                 elif packet.msg_type == BESMessageTypes.SECTOR_SIZE.value:
-                    ver, sector_size = struct.unpack("<H<I", packet.data)
-                    print("Resp OK - programmer sucessfully running, ver 0x%04x, sector_size 0x%08x" % (ver, sector_size))
+                    ver, sector_size = struct.unpack("<HI", packet.data)
+                    print(f"Resp OK - programmer sucessfully running, ver 0x{ver:04x}, sector_size 0x{sector_size:08x}")
                     sys.stdout.flush()
                 else:
-                    raise Exception("Run code failed: bad reply msg_type %02x" % packet.msg_type)
+                    raise Exception(f"Run code failed: bad reply msg_type {packet.msg_type:02x}")
 
     @classmethod
     def read_flash_info(cls):
@@ -247,7 +259,7 @@ class BESLink:
         while datetime.now() < exit_time:
             packet = cls._read_packet()
             if packet.msg_type == BESMessageTypes.FLASH_CMD.value:
-                print(f"Flash info: ID {bytes(packet.data[1:4]).hex("-")}")
+                print(f"Flash info: ID {packet.data[1:4].hex("-")}")
                 sys.stdout.flush()
                 break
         # 0x65:0x12
@@ -256,7 +268,7 @@ class BESLink:
         while datetime.now() < exit_time:
             packet = cls._read_packet()
             if packet.msg_type == BESMessageTypes.FLASH_CMD.value:
-                print(f"Flash info: Unique ID {bytes(packet.data[5:]).hex()}")
+                print(f"Flash info: Unique ID {packet.data[5:].hex()}")
                 sys.stdout.flush()
                 break
 
@@ -425,7 +437,7 @@ class BESLink:
         raise Exception("Timeout waiting for programming ack")
 
     @classmethod
-    def _create_burn_data_message(cls, sequence: int, data_payload: List[bytes]) -> List[bytes]:
+    def _create_burn_data_message(cls, sequence: int, data_payload: bytearray) -> bytearray:
         """
         Creates the ready-to-send message to burn this chunk of data
         """
@@ -466,11 +478,11 @@ class BESLink:
         return template
 
     @classmethod
-    def _read_packet_raw(cls) -> List[bytes]:
+    def _read_packet_raw(cls) -> bytearray:
         """
         Try and read a bes packet in the timeout
         """
-        packet = []
+        packet = bytearray()
         remain = 1
 
         while remain > 0:
@@ -551,7 +563,7 @@ class BESLink:
         raise Exception(f"Unhandled packet length request for 0x{packet_id1:02x} / 0x{packet_id2:02x}")
 
     @classmethod
-    def _validate_message_checksum(cls, packet: List[bytes]) -> bool:
+    def _validate_message_checksum(cls, packet: bytearray) -> bool:
         """
         Validate the basic packet sum checksum for a message;
         this is actually just validate that all bytes sum to 0xFF (ignoring overflow)
@@ -560,7 +572,7 @@ class BESLink:
         return chk == packet[-1]
 
     @classmethod
-    def _calculate_message_checksum(cls, packet: List[bytes]) -> bytes:
+    def _calculate_message_checksum(cls, packet: bytearray) -> bytes:
         """
         Calculates the checksum for this message and returns it
         """
@@ -602,13 +614,15 @@ def sync(port_name):
 
 @cli.command()
 @click.argument("port_name")
-def code(port_name):
+@click.option("-f", "--force", is_flag=True)
+# @click.option("--force", "force")
+def code(port_name, force):
     """"""
     print(f"Load code @ {port_name}")
     sys.stdout.flush()
     bes = BESLink(serial.Serial(port=port_name, baudrate=BES_BAUD, timeout=30))
     state = bes.wait_for_sync()
-    if state != "programmer running":
+    if force or state != "programmer running":
         bes.load_code_blob()
         bes.wait_for_sync()
     bes.close_port()
@@ -632,7 +646,7 @@ def info(port_name):
     print(f"Querying for info @ {port_name}")
     sys.stdout.flush()
     bes = BESLink(serial.Serial(port=port_name, baudrate=BES_BAUD, timeout=5))
-    # BESLink.run_programmer()
+    BESLink.run_programmer()
     BESLink.read_flash_info()
     bes.close_port()
 
