@@ -58,9 +58,9 @@ class BESPacket:
     sync = 0xBE
     msg_type = 0
     sequence = 0
-    data_len = 0
+    data_len = 0    # max 21 bytes accepted by bootloader
+    data = bytearray()
     checksum = 0
-    data = []    
 
     def __init__(self):
         pass
@@ -104,25 +104,28 @@ class BESLink:
         print(f"Waiting for sync on {cls.serial_port.name}")
         print("Send SYNC request")
         sys.stdout.flush()
-        cls._write_paket_raw(cls.SYNC_MESSAGE)
+        # cls._write_paket_raw(cls.SYNC_MESSAGE)
+        # in programmer mode argument doesn't matters coz programmer doensn't support SYNC message and will reply with error code 0xf
+        # in bootrom mode: 1 - for noraml mode, 0x56 - for secure mode
+        cls._write_paket_raw_data(BESMessageTypes.SYNC, [ 0x01 ])
         exit_time = datetime.now() + timedelta(seconds=30)
         # Sync packet from bootloader is {BE,50,00,03,00,00,01,ED}
         state = "unknown state"
         while datetime.now() < exit_time:
             packet = cls._read_packet()
             if packet.msg_type == BESMessageTypes.SYNC.value:
-                sync_code = packet.data[0] # 0 - bootloader just started, 2 - bootloader is already running and synced, 0xf - programmer is already running
+                sync_code = packet.data[0] # 0 - bootloader just started, 2 - bootloader is already running and synced, 0xf - programmer is already running (programmer return ERR_TYPE_INVALID = 0x0F for SYNC msg)
                 state = "unknown state"
                 if sync_code == 0:
                     state = "bootloader started"
-                if sync_code == 2:
+                if sync_code == 2: # 2 in normal mode, 0x57 in secure mode
                     state = "bootloader running"
                 if sync_code == 0xf:
                     state = "programmer running"
                 print(f"Got SYNC reply (code 0x{sync_code:02x} - {state})")
                 if sync_code == 0:
                     cls.wait_for_sync()
-                elif sync_code == 0xf: # after sync reply programmer sends 0x60 msg SECTOR_SIZE
+                elif sync_code == 0xf: # after 0xf code programmer sends msg 0x60(SECTOR_SIZE) as sign of resync
                     packet = cls._read_packet()
                     if packet.msg_type == BESMessageTypes.SECTOR_SIZE.value:
                         ver, sector_size = struct.unpack("<HI", packet.data)
@@ -137,10 +140,10 @@ class BESLink:
     def run_programmer(cls):
         state = BESLink.wait_for_sync()
         if state != "programmer running":
-            BESLink.load_code_blob()
+            BESLink.load_code_blob("../romdumper/programmer2001.code.bin")
 
     @classmethod
-    def load_code_blob(cls):
+    def load_code_blob(cls, payload_file):
         """
         Loading in the code blob
         """
@@ -149,7 +152,7 @@ class BESLink:
 
         #TODO: autodetect payload is raw or formatted by checking header
         # with open("../romdumper/main.bin", "r+b") as f:
-        with open("../romdumper/programmer2001.code.bin", "r+b") as f:
+        with open(payload_file, "r+b") as f:
             code_payload = f.read()
             f.close()
 
@@ -195,8 +198,8 @@ class BESLink:
                         break
                     else:
                         desc = ""
-                        if packet.data[0] == 0xf:
-                            desc = " - code is already running"
+                        if packet.data[0] == 0xf: # programmer return ERR_TYPE_INVALID = 0x0F for unsupported msg types
+                            desc = " - seems like code is already running"
                         raise Exception(f"Resp NOT OK to start code upload, error 0x{packet.data[0]:02x}{desc}")
                 # it seems like programmer returns msg_type 0x60 for every unsupported sended msg_type value
                 elif packet.msg_type == BESMessageTypes.SECTOR_SIZE.value:
@@ -614,29 +617,18 @@ def sync(port_name):
 
 @cli.command()
 @click.argument("port_name")
+@click.option("-p", "--payload", default="../romdumper/programmer2001.code.bin")
 @click.option("-f", "--force", is_flag=True)
 # @click.option("--force", "force")
-def code(port_name, force):
+def code(port_name, payload, force):
     """"""
     print(f"Load code @ {port_name}")
     sys.stdout.flush()
     bes = BESLink(serial.Serial(port=port_name, baudrate=BES_BAUD, timeout=30))
     state = bes.wait_for_sync()
     if force or state != "programmer running":
-        bes.load_code_blob()
+        bes.load_code_blob(payload)
         bes.wait_for_sync()
-    bes.close_port()
-
-@cli.command()
-@click.argument("port_name")
-def code_force(port_name):
-    """"""
-    print(f"Load code force @ {port_name}")
-    sys.stdout.flush()
-    bes = BESLink(serial.Serial(port=port_name, baudrate=BES_BAUD, timeout=30))
-    bes.wait_for_sync()
-    bes.load_code_blob()
-    bes.wait_for_sync()
     bes.close_port()
 
 @cli.command()
