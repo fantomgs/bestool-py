@@ -1029,6 +1029,18 @@ def mod_bootmode(port_name, bits, set, sync):
             bes.clear_bootmode(bits)
     bes.close_port()
 
+@cli.command()
+@click.argument("port_name")
+def en_jtag(port_name):
+    print(f"Reboot with enabled jtag @ {port_name}")
+    sys.stdout.flush()
+    port = serial.Serial(port=port_name, baudrate=BES_BAUD, timeout=30)
+    bes = BESLink(port)
+    bes.wait_for_sync()
+    bes.set_bootmode(0x40)
+    bes.reboot()
+    bes.close_port()
+    monitor(port_name)
 
 @cli.command()
 def list_ports():
