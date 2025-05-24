@@ -60,6 +60,51 @@ class BESSysCmdTypes(Enum):
     CLR_BOOTMODE    = 0xE2 # args: 4 bytes.
     GET_BOOTMODE    = 0xE3 # args: no, return 4 bytes.
 
+class BESBootmodeTypes(Enum):
+  WATCHDOG = 0x1
+  GLOBAL = 0x2
+  RTC = 0x4
+  CHARGER = 0x8
+  READ_ENABLED = 0x10
+  WRITE_ENABLED = 0x20
+  JTAG_ENABLED = 0x40
+  FORCE_USB_DLD = 0x80
+  FORCE_UART_DLD = 0x100
+  DLD_TRANS_UART = 0x200
+  SKIP_FLASH_BOOT = 0x400
+  CHIP_TEST = 0x800
+  FACTORY = 0x1000
+  CALIB = 0x2000
+  ROM_RESERVED_14 = 0x4000
+  FLASH_BOOT = 0x8000
+  REBOOT = 0x10000
+  ROM_RESERVED_17 = 0x20000
+  FORCE_USB_PLUG_IN = 0x40000
+  POWER_DOWN_WAKEUP = 0x80000
+#   TEST_MASK = 0x700000
+  TEST_MODE = 0x100000
+  TEST_SIGNALINGMODE = 0x200000
+  TEST_NOSIGNALINGMODE = 0x400000
+  ENTER_HIDE_BOOT = 0x800000
+  RESERVED_BIT24 = 0x1000000
+  REBOOT_FROM_CRASH = 0x2000000
+  CDC_COMM = 0x10000000
+  REBOOT_BT_ON = 0x20000000
+  REBOOT_ANC_ON = 0x40000000
+  LOCAL_PLAYER = 0x80000000
+
+def bootmode_to_string(mode) -> str:
+    if type(mode) is str:
+        if str.lower(mode[:2]) == "0x":
+            mode = int(mode, 16)
+        else:
+            mode = int(mode)
+    names = []
+    for mask in BESBootmodeTypes:
+        if mode & mask.value:
+            names.append(mask.name)
+    return " | ".join(names)
+
 
 class BESPacket:
     MINIMAL_PACKET_LEN = 5 # minimum packet len is 5 (header, command, sequence, dataLen, checksum)
@@ -453,19 +498,21 @@ class BESLink:
         raise Exception("Timed out finalising")
     
     @classmethod
-    def dump_to_file(cls, s_address, s_size, filename: str):
+    def dump_to_file(cls, address, size, filename: str):
         """
         Bulk dump data from any device's address to file
 
         """
-        if str.lower(s_address[:2]) == "0x":
-            address = int(s_address, 16)
-        else:
-            address = int(s_address)
-        if str.lower(s_size[:2]) == "0x":
-            size = int(s_size, 16)
-        else:
-            size = int(s_size)
+        if type(address) is str:
+            if str.lower(address[:2]) == "0x":
+                address = int(address, 16)
+            else:
+                address = int(address)
+        if type(size) is str:
+            if str.lower(size[:2]) == "0x":
+                size = int(size, 16)
+            else:
+                size = int(size)
         with open(filename, "wb") as f:
             if cls.programmer_running:
                 resync_at = datetime.now() + timedelta(seconds=10)
@@ -569,6 +616,62 @@ class BESLink:
                 raise Exception(f"Bad return code {packet.data[0]:02x}")
         else:
             raise Exception("Unexpected msg_type {packet.msg_type:02x} in FLASH_BOOT reply")
+
+    @classmethod
+    def get_bootmode(cls) -> int:
+        cls._write_paket_raw_data(BESMessageTypes.SYS, [ BESSysCmdTypes.GET_BOOTMODE.value ])
+        print("Send GET_BOOTMODE request...")
+        packet = cls._read_packet()
+        if packet.msg_type == BESMessageTypes.SYS.value:
+            print(f"Got GET_BOOTMODE reply {packet.data.hex(" ")}")
+            sys.stdout.flush()
+            if packet.data[0] != 0x00:
+                raise Exception(f"Bad return code {packet.data[0]:02x}")
+            return struct.unpack("<I", packet.data[1:5])[0]
+        else:
+            raise Exception("Unexpected msg_type {packet.msg_type:02x} in GET_BOOTMODE reply")
+
+    @classmethod
+    def set_bootmode(cls, mode):
+        """ Set BOOTMODE bits except of READ_ENABLED and WRITE_ENABLED """
+        if type(mode) is str:
+            if str.lower(mode[:2]) == "0x":
+                mode = int(mode, 16)
+            else:
+                mode = int(mode)
+        data = bytearray( [BESSysCmdTypes.SET_BOOTMODE.value] )
+        data.extend(struct.pack("<I", mode))
+        cls._write_paket_raw_data(BESMessageTypes.SYS, data)
+        print("Send SET_BOOTMODE request...")
+        packet = cls._read_packet()
+        if packet.msg_type == BESMessageTypes.SYS.value:
+            print(f"Got SET_BOOTMODE reply {packet.data.hex(" ")}")
+            sys.stdout.flush()
+            if packet.data[0] != 0x00:
+                raise Exception(f"Bad return code {packet.data[0]:02x}")
+        else:
+            raise Exception("Unexpected msg_type {packet.msg_type:02x} in SET_BOOTMODE reply")
+
+    @classmethod
+    def clear_bootmode(cls, mode):
+        """ Clear BOOTMODE bits except of READ_ENABLED and WRITE_ENABLED """
+        if type(mode) is str:
+            if str.lower(mode[:2]) == "0x":
+                mode = int(mode, 16)
+            else:
+                mode = int(mode)
+        data = bytearray( [BESSysCmdTypes.CLR_BOOTMODE.value] )
+        data.extend(struct.pack("<I", mode))
+        cls._write_paket_raw_data(BESMessageTypes.SYS, data)
+        print("Send CLR_BOOTMODE request...")
+        packet = cls._read_packet()
+        if packet.msg_type == BESMessageTypes.SYS.value:
+            print(f"Got CLR_BOOTMODE reply {packet.data.hex(" ")}")
+            sys.stdout.flush()
+            if packet.data[0] != 0x00:
+                raise Exception(f"Bad return code {packet.data[0]:02x}")
+        else:
+            raise Exception("Unexpected msg_type {packet.msg_type:02x} in CLR_BOOTMODE reply")
 
     @classmethod
     def _wait_for_programming_ack(cls) -> int:
@@ -885,6 +988,47 @@ def flash_boot(port_name, sync):
     bes = BESLink(port)
     bes.flash_boot()
     bes.close_port()
+
+@cli.command()
+@click.argument("port_name")
+@click.option("-s", "--sync", is_flag=True)
+def bootmode(port_name, sync):
+    """ Show bootmode bits """
+    port = serial.Serial(port=port_name, baudrate=BES_BAUD, timeout=30)
+    bes = BESLink(port)
+    if sync:
+        bes.wait_for_sync()
+    print(f"Get bootmode @ {port_name}")
+    sys.stdout.flush()
+    bits = bes.get_bootmode()
+    print(f"Bootmode = 0x{bits:08x} ({bootmode_to_string(bits)})")
+    bes.close_port()
+
+@cli.command()
+@click.argument("port_name")
+@click.option("-e/-d", "--set/--clear", default=True)
+@click.option("-b", "--bits", default=None)
+@click.option("-s", "--sync", is_flag=True)
+def mod_bootmode(port_name, bits, set, sync):
+    """ Modify bootmode bits """
+    port = serial.Serial(port=port_name, baudrate=BES_BAUD, timeout=30)
+    bes = BESLink(port)
+    if sync:
+        bes.wait_for_sync()
+    if bits == None:
+        print(f"Get bootmode @ {port_name}")
+        sys.stdout.flush()
+        bits = bes.get_bootmode()
+        print(f"Bootmode = 0x{bits:08x} ({bootmode_to_string(bits)})")
+    else:
+        print(f"{("Set" if set else "Clear")} bootmode bits {bits} ({bootmode_to_string(bits)}) @ {port_name}")
+        sys.stdout.flush()
+        if set:
+            bes.set_bootmode(bits)
+        else:
+            bes.clear_bootmode(bits)
+    bes.close_port()
+
 
 @cli.command()
 def list_ports():
