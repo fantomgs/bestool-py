@@ -21,6 +21,7 @@ class BESMessageTypes(Enum):
     SYS                         = 0x00
     READ                        = 0x01
     WRITE                       = 0x02
+    NOTIFICATION                = 0x10 # bl?, pg+ - sent by programmer in case of error? i.t. flash open error: data[0] - err returned by hal_norflash_open, data[1:3] - flash_id)
     BULK_READ                   = 0x03 # bl+, pg+
     SYNC                        = 0x50 # bl+, pg-
     CODE_INFO                   = 0x53 # bl+, pg-
@@ -52,12 +53,12 @@ class BESFlashCmdTypes(Enum):
 
 
 class BESSysCmdTypes(Enum):
-    REBOOT          = 0xF1 # no args
-    SHUTDOWN        = 0xF2 # no args
-    FLASH_BOOT      = 0xF3 # no args
-    SET_BOOTMODE    = 0xE1 # arg 4 bytes
-    CLR_BOOTMODE    = 0xE2 # arg 4 bytes
-    GET_BOOTMODE    = 0xE3 # no args, return 4 bytes
+    REBOOT          = 0xF1 # args: no.                  support: bl: hw_reset_0x71; pg: bootmode |= BOOTMODE_SKIP_FLASH_BOOT, hw_reset_0x71 (i.e. in bootloader mode - reboot, in programmer mode - reboot to bootloader mode); return: bl+, pg+
+    SHUTDOWN        = 0xF2 # args: no.                  support: bl+, pg+; action: bl - PMU_REG_POWER_OFF |= 1 and loop(1), pg - loop(1); return: bl+, pg+
+    FLASH_BOOT      = 0xF3 # args: no.
+    SET_BOOTMODE    = 0xE1 # args: 4 bytes.
+    CLR_BOOTMODE    = 0xE2 # args: 4 bytes.
+    GET_BOOTMODE    = 0xE3 # args: no, return 4 bytes.
 
 
 class BESPacket:
@@ -557,6 +558,19 @@ class BESLink:
             raise Exception("Unexpected msg_type {packet.msg_type:02x} in SHUTDOWN reply")
 
     @classmethod
+    def flash_boot(cls):
+        cls._write_paket_raw_data(BESMessageTypes.SYS, [ BESSysCmdTypes.FLASH_BOOT.value ])
+        print("Send FLASH_BOOT request...")
+        packet = cls._read_packet()
+        if packet.msg_type == BESMessageTypes.SYS.value:
+            print(f"Got FLASH_BOOT reply {packet.data.hex(" ")}")
+            sys.stdout.flush()
+            if packet.data[0] != 0x00:
+                raise Exception(f"Bad return code {packet.data[0]:02x}")
+        else:
+            raise Exception("Unexpected msg_type {packet.msg_type:02x} in FLASH_BOOT reply")
+
+    @classmethod
     def _wait_for_programming_ack(cls) -> int:
         """
         Wait for an ack for programming
@@ -825,7 +839,7 @@ def dump(port_name, address, size, filepath, use_programmer):
         bes.run_programmer() # doesn't need a programmer to dump smthng, but ~x2 slow
         bes.read_flash_info() # unsupported without programmer
     bes.dump_to_file(address, size, filepath)
-    port.close()
+    bes.close_port()
 
 @cli.command()
 @click.argument("port_name")
@@ -842,12 +856,13 @@ def reboot(port_name, sync, resync):
     bes.reboot()
     if resync:
         bes.wait_for_sync()
-    port.close()
+    bes.close_port()
 
 @cli.command()
 @click.argument("port_name")
 @click.option("-s", "--sync", is_flag=True)
-def shutdown(port_name, sync):
+@click.option("-r", "--resync", is_flag=True)
+def shutdown(port_name, sync, resync):
     """"""
     print(f"Do shutdown device @ {port_name}")
     sys.stdout.flush()
@@ -856,7 +871,20 @@ def shutdown(port_name, sync):
     if sync:
         bes.wait_for_sync()
     bes.shutdown()
-    port.close()
+    if resync:
+        bes.wait_for_sync()
+    bes.close_port()
+
+@cli.command()
+@click.argument("port_name")
+def flash_boot(port_name, sync):
+    """ Exit from bootloader in bootloader mode or call boot_from_flash_reent in programmer mode """
+    print(f"Exit bootloader/call boot from flash device @ {port_name}")
+    sys.stdout.flush()
+    port = serial.Serial(port=port_name, baudrate=BES_BAUD, timeout=30)
+    bes = BESLink(port)
+    bes.flash_boot()
+    bes.close_port()
 
 @cli.command()
 def list_ports():
