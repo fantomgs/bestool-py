@@ -1,5 +1,4 @@
-#! python3
-
+#! /usr/local/bin/python3
 
 from enum import Enum
 import sys
@@ -13,7 +12,7 @@ import time
 from datetime import datetime, timedelta
 import struct
 
-__author__ = "Ben V. Brown"
+__author__ = "Ben V. Brown (ext. by Fan Tom G.S.)"
 BES_BAUD = 921600
 
 # send at msg_type
@@ -94,11 +93,7 @@ class BESBootmodeTypes(Enum):
   LOCAL_PLAYER = 0x80000000
 
 def bootmode_to_string(mode) -> str:
-    if type(mode) is str:
-        if str.lower(mode[:2]) == "0x":
-            mode = int(mode, 16)
-        else:
-            mode = int(mode)
+    mode = atoi(mode)
     names = []
     for mask in BESBootmodeTypes:
         if mode & mask.value:
@@ -110,27 +105,30 @@ class BESPacket:
     MINIMAL_PACKET_LEN = 5 # minimum packet len is 5 (header, command, sequence, dataLen, checksum)
 
     sync = 0xBE
-    msg_type = 0
+    msg_type = None
     sequence = 0
     data_len = 0    # max 21 bytes accepted by bootloader
-    data = bytearray()
+    data: bytearray
     checksum = 0
+    
+    raw: bytearray
 
     def __init__(self):
         pass
     
     def __init__(self, data):
         self.packet = self.parse_packet(data)
+        self.raw = data
     
     def parse_packet(self, data):
         self.sync = data[0]
-        self.msg_type = data[1]
+        self.msg_type = BESMessageTypes(data[1])
         self.sequence = data[2]
         self.data_len = data[3]
         self.checksum = data[4 + self.data_len]
-        self.data = bytearray()
+        # self.data = bytearray()
         if self.data_len > 0:
-            self.data.extend(data[4:4 + self.data_len])
+            self.data = data[4:4 + self.data_len]
         return self
 
     
@@ -138,10 +136,6 @@ class BESLink:
     """
     Wrapper class for communcations with the BES bootloader thing
     """
-    SYNC_MESSAGE    = [0xBE, BESMessageTypes.SYNC.value, 0x00, 0x01, 0x01, 0xEF]
-    CODE_MESSAGE    = [0xBE, BESMessageTypes.CODE.value, 0xA2, 0x03, 0x00, 0x00, 0x00, 0x48]
-    RUN_MESSAGE     = [0xBE, BESMessageTypes.RUN.value, 0x01, 0x00, 0xEB]
-
     serial_port: serial.Serial
     wr_seq = 0
     rd_seq = 0
@@ -168,7 +162,7 @@ class BESLink:
         state = "unknown state"
         while datetime.now() < exit_time:
             packet = cls._read_packet()
-            if packet.msg_type == BESMessageTypes.SYNC.value:
+            if packet.msg_type == BESMessageTypes.SYNC:
                 sync_code = packet.data[0] # 0 - bootloader just started, 2 - bootloader is already running and synced, 0xf - programmer is already running (programmer return ERR_TYPE_INVALID = 0x0F for SYNC msg)
                 state = "unknown state"
                 if sync_code == 0:
@@ -183,20 +177,23 @@ class BESLink:
                 elif sync_code == 0xf: # after 0xf code programmer sends msg 0x60(SECTOR_SIZE) as sign of resync
                     cls.programmer_running = True
                     packet = cls._read_packet()
-                    if packet.msg_type == BESMessageTypes.SECTOR_SIZE.value:
+                    if packet.msg_type == BESMessageTypes.SECTOR_SIZE:
                         ver, sector_size = struct.unpack("<HI", packet.data)
                         print(f"Got SECTOR_SIZE reply, ver 0x{ver:04x}, sector_size 0x{sector_size:08x}")
                 elif sync_code != 2:
-                    raise Exception(f"Unknown sync state 0x{sync_code:02x}")                    
+                    raise Exception(f"Unknown sync state 0x{sync_code:02x}")
                 sys.stdout.flush()
                 break
         return state
 
     @classmethod
-    def run_programmer(cls):
-        state = BESLink.wait_for_sync()
-        if state != "programmer running":
-            BESLink.load_code_blob("../romdumper/programmer2001.code.bin")
+    def run_programmer(cls, sync=True, force=False):
+        state = None
+        if sync:
+            state = BESLink.wait_for_sync()
+        # print(f"state {state}")
+        if force or state != "programmer running":
+            BESLink.load_code_blob("./payload/programmer2001.code.bin")
 
     @classmethod
     def load_code_blob(cls, payload_file):
@@ -220,26 +217,13 @@ class BESLink:
 
             crc = zlib.crc32(code_payload)
 
-            print(f"Paylod info: size {size}, load address 0x{address:08x}, crc32 0x{crc:08x}, entry 0x{entry:08x}, param 0x{param:08x}, sp 0x{sp:08x}")
+            print(f"Payload info: size {size}, load address 0x{address:08x}, crc32 0x{crc:08x}, entry 0x{entry:08x}, param 0x{param:08x}, sp 0x{sp:08x}")
             sys.stdout.flush()
 
-            code_info_msg_data = [
-                # code address
-                (address >> 0) & 0xff,
-                (address >> 8) & 0xff,
-                (address >> 16) & 0xff,
-                (address >> 24) & 0xff,
-                # code size
-                (size >> 0) & 0xff,
-                (size >> 8) & 0xff,
-                (size >> 16) & 0xff,
-                (size >> 24) & 0xff,
-                # code crc32
-                (crc >> 0) & 0xff,
-                (crc >> 8) & 0xff,
-                (crc >> 16) & 0xff,
-                (crc >> 24) & 0xff,
-            ]
+            code_info_msg_data = bytearray()
+            code_info_msg_data.extend(struct.pack("<I", address))
+            code_info_msg_data.extend(struct.pack("<I", size))
+            code_info_msg_data.extend(struct.pack("<I", crc))
             # Send code info message
             print("Send CODE_INFO message")
             sys.stdout.flush()
@@ -247,7 +231,7 @@ class BESLink:
             # wait for response
             while datetime.now() < exit_time:
                 packet = cls._read_packet()
-                if packet.msg_type == BESMessageTypes.CODE_INFO.value:
+                if packet.msg_type == BESMessageTypes.CODE_INFO:
                     if packet.data[0] == 0:
                         print("Resp OK to start code upload")
                         sys.stdout.flush()
@@ -258,7 +242,7 @@ class BESLink:
                             desc = " - seems like code is already running"
                         raise Exception(f"Resp NOT OK to start code upload, error 0x{packet.data[0]:02x}{desc}")
                 # it seems like programmer returns msg_type 0x60 for every unsupported sended msg_type value
-                elif packet.msg_type == BESMessageTypes.SECTOR_SIZE.value:
+                elif packet.msg_type == BESMessageTypes.SECTOR_SIZE:
                     cls.programmer_running = True
                     ver, sector_size = struct.unpack("<HI", packet.data)
                     print(f"Resp NOT OK - programmer already running, ver 0x%04x, sector_size 0x%08x" % (ver, sector_size))
@@ -268,14 +252,14 @@ class BESLink:
                     raise Exception(f"Code load failed - unknown msg_type in reply 0x{packet.msg_type:02x}")
             print("Send CODE")
             sys.stdout.flush()
-            cls._write_paket_raw(cls.CODE_MESSAGE)
+            cls._write_paket_raw_data(BESMessageTypes.CODE, [0x00, 0x00, 0x00])
             cls.serial_port.write(code_payload)
             # wait for response
             while datetime.now() < exit_time:
                 packet = cls._read_packet()
                 #TODO: catch error: in case of incorrect CODE CRC bootloader silently (without sending 0x54 reply with error code) send resync message RX [ be,50,01,03,00,00,01,ec ]  8
                 #TODO: catch error: be 54 01 01 24 c7 - ERR_CODE_INFO_MISSING
-                if packet.msg_type == BESMessageTypes.CODE.value:
+                if packet.msg_type == BESMessageTypes.CODE:
                     if packet.data[0] == 0x20:
                         print("Resp OK to loading code")
                         sys.stdout.flush()
@@ -286,13 +270,14 @@ class BESLink:
                     raise Exception(f"Load code failed: bad reply msg_type 0x{packet.msg_type:02x}")
             print("Send RUN message")
             sys.stdout.flush()
-            cls._write_paket_raw(cls.RUN_MESSAGE)
+            # cls._write_paket_raw(cls.RUN_MESSAGE)
+            cls._write_paket_raw_data(BESMessageTypes.RUN, [])
             while datetime.now() < exit_time:
                 packet = cls._read_packet()
                 # msg 0x55 is returned by bootloader after code running is done
                 # normally when programmer payload code is starting first incoming message will be 0x60
                 # programmer blob never return (loop forever)? exit only by reboot
-                if packet.msg_type == BESMessageTypes.RUN.value:
+                if packet.msg_type == BESMessageTypes.RUN:
                     if packet.data[0] == 0:
                         cls.programmer_running = False
                         ret_code = struct.unpack("<I", packet.data[1:5])
@@ -301,7 +286,7 @@ class BESLink:
                         break
                     else:
                         raise Exception(f"Run code exit with error 0x{packet.data[0]:02x}")
-                elif packet.msg_type == BESMessageTypes.SECTOR_SIZE.value:
+                elif packet.msg_type == BESMessageTypes.SECTOR_SIZE:
                     cls.programmer_running = True
                     ver, sector_size = struct.unpack("<HI", packet.data)
                     print(f"Resp OK - programmer sucessfully running, ver 0x{ver:04x}, sector_size 0x{sector_size:08x}")
@@ -321,7 +306,7 @@ class BESLink:
 
         while datetime.now() < exit_time:
             packet = cls._read_packet()
-            if packet.msg_type == BESMessageTypes.FLASH_CMD.value:
+            if packet.msg_type == BESMessageTypes.FLASH_CMD:
                 print(f"Flash info: ID {packet.data[1:4].hex("-")}")
                 sys.stdout.flush()
                 break
@@ -330,7 +315,7 @@ class BESLink:
 
         while datetime.now() < exit_time:
             packet = cls._read_packet()
-            if packet.msg_type == BESMessageTypes.FLASH_CMD.value:
+            if packet.msg_type == BESMessageTypes.FLASH_CMD:
                 print(f"Flash info: Unique ID {packet.data[5:].hex()}")
                 sys.stdout.flush()
                 break
@@ -376,71 +361,56 @@ class BESLink:
         Load the provided program in at the default locations
 
         """
+        cls.program_raw_binary_file(0x80000, filename)
+    
+    @classmethod
+    def program_raw_binary_file(cls, flash_offset, filename: str):
+        """
+        Burn the provided binary at flash offset
 
+        """
+        # sector_size = 0x8000 # 32KiB
+        sector_size = 0x1000 # 4KiB
+        flash_offset = atoi(flash_offset)
+        if flash_offset < 0 or flash_offset > 16*1024*1024:
+            raise Exception(f"Flash offset {flash_offset:0x08x} out of bounds")
         with open(filename, "r+b") as f:
-            file_payload = f.read()
-        file_payload = file_payload[0:-4]
-        file_length_raw = len(file_payload)
-        # have to pad up to a multiple of 0x8000
-        if file_length_raw % 0x8000 != 0:
-            padding_len = 0x8000 - (file_length_raw % 0x8000)
+            packed_file = f.read()
+        burn_len = len(packed_file)
+        # have to pad up to a multiple of sector_size
+        if burn_len % sector_size != 0:
+            raise Exception(f"File {filename} len is not multiple of 0x{sector_size:04x}")
+            padding_len = sector_size - (burn_len % sector_size)
             padding = [0xFF] * padding_len
-            packed_file = file_payload + bytes(padding)
+            packed_file = packed_file + bytes(padding)
 
-        file_length = len(packed_file)
-        #
-        start_address = 0x3C000000
-        burn_start_msg = [
-            0xBE,
-            0x61,
-            0x07,
-            0x0C,
-            0x00,
-            0x00,
-            0x00,
-            0x3C,
-            0x00,
-            0x00,
-            0x0D,
-            0x00,
-            0x00,
-            0x80,
-            0x00,
-            0x0,
-            0x04,
-        ]
-        burn_start_msg[4] = (start_address >> 0) & 0xFF
-        burn_start_msg[5] = (start_address >> 8) & 0xFF
-        burn_start_msg[6] = (start_address >> 16) & 0xFF
-        burn_start_msg[7] = (start_address >> 24) & 0xFF
-        burn_start_msg[8] = (file_length >> 0) & 0xFF
-        burn_start_msg[9] = (file_length >> 8) & 0xFF
-        burn_start_msg[10] = (file_length >> 16) & 0xFF
-        burn_start_msg[11] = (file_length >> 24) & 0xFF
-        # update checksum
-        burn_start_msg[-1] = cls._calculate_message_checksum(burn_start_msg[0:-1])
-        cls._write_paket_raw(burn_start_msg)
+        burn_len = len(packed_file)
+        burn_addr = 0x2C000000 + flash_offset
+        data = bytearray()
+        data.extend(struct.pack("<I", burn_addr))
+        data.extend(struct.pack("<I", burn_len))
+        data.extend(struct.pack("<I", sector_size))
+        cls._write_paket_raw_data(BESMessageTypes.ERASE_BURN_START, data)
         exit_time = datetime.now() + timedelta(seconds=30)
 
         while datetime.now() < exit_time:
             packet = cls._read_packet()
-            if packet[1] == BESMessageTypes.ERASE_BURN_START.value:
+            if packet.msg_type == BESMessageTypes.ERASE_BURN_START:
                 print(f"Flash burn start returned {packet}")
                 sys.stdout.flush()
-                if packet[3] != 0x01:
+                if packet.data_len != 0x01 or packet.data[0] != 0x00:
                     raise Exception("Possible bad programming start?")
                 break
         # Start splitting up the payload and sending it
-        total_packets_to_send = len(packed_file) / 0x8000
+        total_packets_to_send = len(packed_file) / sector_size
         packets_waiting_ack = []
         seq = 0
         while len(packed_file) > 0:
-            chunk = packed_file[0:0x8000]
-            packed_file = packed_file[0x8000:]
-            data_to_send = cls._create_burn_data_message(seq, chunk)
+            chunk = packed_file[0:sector_size]
+            packed_file = packed_file[sector_size:]
             print(f"Sending data chunk {seq}")
             sys.stdout.flush()
-            cls._write_paket_raw(data_to_send)
+            cls._send_burn_data_message(seq, chunk)
             packets_waiting_ack.append(seq)
             if seq < 1:
                 time.sleep(0.4)
@@ -463,39 +433,39 @@ class BESLink:
                 raise Exception(f"Double ack for {ack_seq}")
         print("Sending done; sending commit")
         sys.stdout.flush()
-        # Now send the final commit message
+        # Now send the final commit message - it writes magic value at flash header marking flash as containing valid firmware
         commit_msg = [
-            0xBE,
-            0x65,
-            0x08,
-            0x09,
-            0x22,
-            0x00,
-            0x00,
-            0x00,
-            0x3C,
             0x1C,
             0xEC,
             0x57,
             0xBE,
-            0x50,
         ]
-        commit_msg[5] = (start_address >> 0) & 0xFF
-        commit_msg[6] = (start_address >> 8) & 0xFF
-        commit_msg[7] = (start_address >> 16) & 0xFF
-        commit_msg[8] = (start_address >> 24) & 0xFF
-        commit_msg[13] = cls._calculate_message_checksum(commit_msg[0:-1])
-        cls._write_paket_raw(commit_msg)
+        cls.burn_data_short(burn_addr, commit_msg)
+    
+    @classmethod
+    def burn_short(cls, burn_addr, burn_data:bytearray):
+        """ Use FLASH_CMD->BURN_DATA to burn directly up to 16 bytes """
+        if len(burn_data) > 16:
+            raise Exception("burn_short: cannot burn more than 16 bytes at once")
+        packet_data = bytearray([BESFlashCmdTypes.BURN_DATA.value])
+        packet_data.extend(struct.pack("<I", burn_addr))
+        packet_data.extend(burn_data)
+        cls._write_paket_raw_data(BESMessageTypes.FLASH_CMD, packet_data)
 
         exit_time = datetime.now() + timedelta(seconds=30)
         while datetime.now() < exit_time:
             packet = cls._read_packet()
-            if packet[1] == BESMessageTypes.FLASH_CMD.value:
-                if packet[2] == 0x08 and packet[3] == 0x01:
-                    print("Done")
+            if packet.msg_type == BESMessageTypes.FLASH_CMD:
+                # if packet[2] == 0x08 and packet[3] == 0x01:
+                if packet.data[0] == 0x00:
+                    print("burn_short: done")
                     sys.stdout.flush()
                     return
-        raise Exception("Timed out finalising")
+                else:
+                    raise Exception(f"burn_short: error {packet.data[0]:02x} in FLASH_CMD reply")
+            else:
+                raise Exception(f"burn_short: unexpected msg_type {packet.msg_type} in FLASH_CMD reply")
+        raise Exception("burn_short: burn data timed out")
     
     @classmethod
     def dump_to_file(cls, address, size, filename: str):
@@ -503,16 +473,8 @@ class BESLink:
         Bulk dump data from any device's address to file
 
         """
-        if type(address) is str:
-            if str.lower(address[:2]) == "0x":
-                address = int(address, 16)
-            else:
-                address = int(address)
-        if type(size) is str:
-            if str.lower(size[:2]) == "0x":
-                size = int(size, 16)
-            else:
-                size = int(size)
+        address = atoi(address)
+        size = atoi(size)        
         with open(filename, "wb") as f:
             if cls.programmer_running:
                 resync_at = datetime.now() + timedelta(seconds=10)
@@ -532,6 +494,7 @@ class BESLink:
                     print(f"Expected {chunk_size}, {received} got")
                 print(f"Total {(size-remain)} of {size} ({((size-remain)/size*100):.0f}%)")
                 # time.sleep(0.01) # give chance to mcu to resets wdt?
+                time.sleep(0.01)
                 # dump may fails on long ops, so try to reinit programmer state (flush buffers, reset timouts, etc.)
                 # seems like this is not needed for bootloader but for programmer only
                 if cls.programmer_running and datetime.now() >= resync_at:
@@ -541,25 +504,15 @@ class BESLink:
 
     
     @classmethod
-    def read_chunk(cls, address, size) -> bytearray:
+    def read_chunk(cls, address:int, size:int) -> bytearray:
         ret = bytearray()
-        bulk_read_msg = [
-            (address >> 0) & 0xFF,
-            (address >> 8) & 0xFF,
-            (address >> 16) & 0xFF,
-            (address >> 24) & 0xFF,
-            (size >> 0) & 0xFF,
-            (size >> 8) & 0xFF,
-            (size >> 16) & 0xFF,
-            (size >> 24) & 0xFF,
-        ]
-        cls._write_paket_raw_data(BESMessageTypes.BULK_READ, bulk_read_msg)
+        cls._write_paket_raw_data(BESMessageTypes.BULK_READ, struct.pack("<II", address, size))
         exit_time = datetime.now() + timedelta(seconds=10)
 
         while datetime.now() < exit_time:
             packet = cls._read_packet()
-            if packet.msg_type == BESMessageTypes.BULK_READ.value:
-                print(f"Bulk read returned {packet.data.hex(" ")}")
+            if packet.msg_type == BESMessageTypes.BULK_READ:
+                # print(f"Bulk read returned {packet.data.hex(" ")}")
                 sys.stdout.flush()
                 if packet.data[0] != 0x00:
                     raise Exception(f"Bad return code {packet.data[0]:02x}")
@@ -567,6 +520,8 @@ class BESLink:
                 remain = size
                 chunk_size = 16
                 while remain > 0:
+                    if chunk_size > remain:
+                        chunk_size = remain
                     data = cls.serial_port.read(size=chunk_size)
                     remain -= len(data)
                     # print(f"{i:08x}: {data.hex(" ")} [{remain}]")
@@ -575,7 +530,7 @@ class BESLink:
                 # print("Done")
                 break
             else:
-                raise Exception("Unexpected msg_type {packet.msg_type:02x} during BULK_READ")
+                raise Exception(f"Unexpected msg_type {packet.msg_type} during BULK_READ")
         return ret
 
     @classmethod
@@ -583,95 +538,87 @@ class BESLink:
         cls._write_paket_raw_data(BESMessageTypes.SYS, [ BESSysCmdTypes.REBOOT.value ])
         print("Send REBOOT request...")
         packet = cls._read_packet()
-        if packet.msg_type == BESMessageTypes.SYS.value:
+        if packet.msg_type == BESMessageTypes.SYS:
             print(f"REBOOT reply {packet.data.hex(" ")}")
             sys.stdout.flush()
             if packet.data[0] != 0x00:
                 raise Exception(f"Bad return code {packet.data[0]:02x}")
         else:
-            raise Exception("Unexpected msg_type {packet.msg_type:02x} in REBOOT reply")
+            raise Exception(f"Unexpected msg_type {packet.msg_type} in REBOOT reply")
 
     @classmethod
     def shutdown(cls):
         cls._write_paket_raw_data(BESMessageTypes.SYS, [ BESSysCmdTypes.SHUTDOWN.value ])
         print("Send SHUTDOWN request...")
         packet = cls._read_packet()
-        if packet.msg_type == BESMessageTypes.SYS.value:
+        if packet.msg_type == BESMessageTypes.SYS:
             print(f"SHUTDOWN reply {packet.data.hex(" ")}")
             sys.stdout.flush()
             if packet.data[0] != 0x00:
                 raise Exception(f"Bad return code {packet.data[0]:02x}")
         else:
-            raise Exception("Unexpected msg_type {packet.msg_type:02x} in SHUTDOWN reply")
+            raise Exception(f"Unexpected msg_type {packet.msg_type} in SHUTDOWN reply")
 
     @classmethod
     def flash_boot(cls):
         cls._write_paket_raw_data(BESMessageTypes.SYS, [ BESSysCmdTypes.FLASH_BOOT.value ])
         print("Send FLASH_BOOT request...")
         packet = cls._read_packet()
-        if packet.msg_type == BESMessageTypes.SYS.value:
+        if packet.msg_type == BESMessageTypes.SYS:
             print(f"Got FLASH_BOOT reply {packet.data.hex(" ")}")
             sys.stdout.flush()
             if packet.data[0] != 0x00:
                 raise Exception(f"Bad return code {packet.data[0]:02x}")
         else:
-            raise Exception("Unexpected msg_type {packet.msg_type:02x} in FLASH_BOOT reply")
+            raise Exception(f"Unexpected msg_type {packet.msg_type} in FLASH_BOOT reply")
 
     @classmethod
     def get_bootmode(cls) -> int:
         cls._write_paket_raw_data(BESMessageTypes.SYS, [ BESSysCmdTypes.GET_BOOTMODE.value ])
         print("Send GET_BOOTMODE request...")
         packet = cls._read_packet()
-        if packet.msg_type == BESMessageTypes.SYS.value:
+        if packet.msg_type == BESMessageTypes.SYS:
             print(f"Got GET_BOOTMODE reply {packet.data.hex(" ")}")
             sys.stdout.flush()
             if packet.data[0] != 0x00:
                 raise Exception(f"Bad return code {packet.data[0]:02x}")
             return struct.unpack("<I", packet.data[1:5])[0]
         else:
-            raise Exception("Unexpected msg_type {packet.msg_type:02x} in GET_BOOTMODE reply")
+            raise Exception(f"Unexpected msg_type {packet.msg_type} in GET_BOOTMODE reply")
 
     @classmethod
     def set_bootmode(cls, mode):
         """ Set BOOTMODE bits except of READ_ENABLED and WRITE_ENABLED """
-        if type(mode) is str:
-            if str.lower(mode[:2]) == "0x":
-                mode = int(mode, 16)
-            else:
-                mode = int(mode)
+        mode = atoi(mode)
         data = bytearray( [BESSysCmdTypes.SET_BOOTMODE.value] )
         data.extend(struct.pack("<I", mode))
         cls._write_paket_raw_data(BESMessageTypes.SYS, data)
         print("Send SET_BOOTMODE request...")
         packet = cls._read_packet()
-        if packet.msg_type == BESMessageTypes.SYS.value:
+        if packet.msg_type == BESMessageTypes.SYS:
             print(f"Got SET_BOOTMODE reply {packet.data.hex(" ")}")
             sys.stdout.flush()
             if packet.data[0] != 0x00:
                 raise Exception(f"Bad return code {packet.data[0]:02x}")
         else:
-            raise Exception("Unexpected msg_type {packet.msg_type:02x} in SET_BOOTMODE reply")
+            raise Exception(f"Unexpected msg_type {packet.msg_type} in SET_BOOTMODE reply")
 
     @classmethod
     def clear_bootmode(cls, mode):
         """ Clear BOOTMODE bits except of READ_ENABLED and WRITE_ENABLED """
-        if type(mode) is str:
-            if str.lower(mode[:2]) == "0x":
-                mode = int(mode, 16)
-            else:
-                mode = int(mode)
+        mode = atoi(mode)
         data = bytearray( [BESSysCmdTypes.CLR_BOOTMODE.value] )
         data.extend(struct.pack("<I", mode))
         cls._write_paket_raw_data(BESMessageTypes.SYS, data)
         print("Send CLR_BOOTMODE request...")
         packet = cls._read_packet()
-        if packet.msg_type == BESMessageTypes.SYS.value:
+        if packet.msg_type == BESMessageTypes.SYS:
             print(f"Got CLR_BOOTMODE reply {packet.data.hex(" ")}")
             sys.stdout.flush()
             if packet.data[0] != 0x00:
                 raise Exception(f"Bad return code {packet.data[0]:02x}")
         else:
-            raise Exception("Unexpected msg_type {packet.msg_type:02x} in CLR_BOOTMODE reply")
+            raise Exception(f"Unexpected msg_type {packet.msg_type} in CLR_BOOTMODE reply")
 
     @classmethod
     def _wait_for_programming_ack(cls) -> int:
@@ -681,14 +628,15 @@ class BESLink:
         exit_time = datetime.now() + timedelta(seconds=30)
         while datetime.now() < exit_time:
             packet = cls._read_packet()
-            if packet[1] == BESMessageTypes.ERASE_BURN_DATA.value:
-                sequence1 = packet[2] - 0xC1
-                sequence2 = packet[5]
-
-                print(f"Flash confirm {sequence1}/{sequence2}")
+            if packet.msg_type == BESMessageTypes.ERASE_BURN_DATA:
+                sequence = struct.unpack("<H", packet.data[1:])
+                if packet.data[0] != 0x00:
+                    raise Exception(f"Got ERASE_BURN_DATA reply error 0x{packet.data[0]:02x} for seq {sequence}")
+                print(f"Burn confirmed seq {sequence}")
                 sys.stdout.flush()
-                if sequence2 == sequence1:
-                    return sequence1
+                return sequence
+            else:                
+                raise Exception(f"Got bad msg_type {packet.msg_type}({(BESMessageTypes(packet.msg_type).name)}) while waiting for ERASE_BURN_DATA reply")
         raise Exception("Timeout waiting for programming ack")
 
     @classmethod
@@ -697,7 +645,7 @@ class BESLink:
         Creates the ready-to-send message to burn this chunk of data
         """
         chunk_size = len(data_payload)
-        if chunk_size != 0x8000:
+        if chunk_size != 0x8000 and chunk_size != 0x1000:
             raise Exception("Size not supported")
         template = [
             0xBE,
@@ -733,9 +681,25 @@ class BESLink:
         return template
 
     @classmethod
+    def _send_burn_data_message(cls, sequence: int, data_payload: bytearray) -> bytearray:
+        """
+        Send message to burn this chunk of data
+        """
+        chunk_size = len(data_payload)
+        if chunk_size != 0x8000 and chunk_size != 0x1000:
+            raise Exception("Size is not supported")
+        crc32_of_chunk = zlib.crc32(data_payload)
+        data = bytearray()
+        data.extend(struct.pack("<I", chunk_size))
+        data.extend(struct.pack("<I", crc32_of_chunk))
+        data.extend(struct.pack("<I", sequence))
+        cls._write_paket_raw_data(BESMessageTypes.ERASE_BURN_DATA, data)
+        cls.serial_port.write(data_payload)
+
+    @classmethod
     def _read_packet_raw(cls) -> bytearray:
         """
-        Try and read a bes packet in the timeout
+        Try and read a bes packet
         """
         packet = bytearray()
         remain = 1
@@ -757,7 +721,7 @@ class BESLink:
                 else:
                     remain -= len(data)
                 
-        print("RX [", bytes(packet).hex(","), "] ", len(packet))
+        print(f"RX {len(packet): 2d} [{packet.hex(" ")}]")
         sys.stdout.flush()
         # Validate the checksum
         if not cls._validate_message_checksum(packet):
@@ -772,22 +736,22 @@ class BESLink:
     @classmethod
     def _write_paket_raw(cls, pkt: bytearray):
         pkt[-1] = cls._calculate_message_checksum(pkt[0:-1])
-        print("TX [", bytes(pkt).hex(","), "] ", len(pkt))
+        print(f"TX {len(pkt): 2d} [{pkt.hex(" ")}]")
         cls.serial_port.write(pkt)
 
     @classmethod
     def _write_paket_raw_data(cls, msg_type: BESMessageTypes, data: bytes):
-        cls.wr_seq += 1
-        pkt = [
+        pkt = bytearray([
             0xBE,
             msg_type.value,
-            0, #cls.wr_seq,
+            cls.wr_seq,
             len(data)
-        ]
+        ])
         pkt.extend(data)
         pkt.append(cls._calculate_message_checksum(pkt))
-        print("TX [", bytes(pkt).hex(","), "] ", len(pkt))
+        print(f"TX {len(pkt): 2d} [{pkt.hex(" ")}]")
         cls.serial_port.write(pkt)
+        cls.wr_seq += 1
 
     @classmethod
     def _lookup_packet_length(cls, packet_id1: bytes, packet_id2: bytes):
@@ -800,7 +764,7 @@ class BESLink:
             return 8
         if packet_id1 == BESMessageTypes.CODE_INFO.value:
             return 6
-        if packet_id1 == BESMessageTypes.CODE_SEND.value:
+        if packet_id1 == BESMessageTypes.CODE.value:
             return 6
         if packet_id1 == BESMessageTypes.SECTOR_SIZE.value:
             return 11
@@ -869,7 +833,7 @@ def sync(port_name):
 
 @cli.command()
 @click.argument("port_name")
-@click.option("-p", "--payload", default="../romdumper/programmer2001.code.bin")
+@click.option("-p", "--payload", default="./payload/programmer2001.code.bin")
 @click.option("-f", "--force", is_flag=True)
 # @click.option("--force", "force")
 def code(port_name, payload, force):
@@ -894,26 +858,32 @@ def info(port_name):
     BESLink.read_flash_info()
     bes.close_port()
 
-
 @cli.command()
 @click.argument("filepath")
-@click.argument("port_name")
-def program(filepath, port_name):
+@click.option("-p", "--port", is_flag=False, default="/dev/ttyS6")
+# @click.option("-a", "--address")
+# @click.option("-s", "--size")
+def burn(filepath, port):
     """"""
-    print(f"beginning programming of {filepath} to device @ {port_name}")
+    print(f"beginning programming of {filepath} to device @ {port}")
     sys.stdout.flush()
+    if port == None:
+        print("Port is not set, using {}")
+        for port in serial.tools.list_ports.comports():
+            print(port)
+    return
     port = serial.Serial(port=port_name, baudrate=BES_BAUD, timeout=30)
     BESLink.run_programmer(port)
     BESLink.read_flash_info(port)
     # BESLink.run_get_cfgdata(port)
-    BESLink.program_binary_file(port, filepath)
+    BESLink.program_binary_file(port, filepath, address, size)
     port.close()
 
 
 @cli.command()
 @click.argument("filepath")
 @click.argument("port_name")
-def program_watch(filepath, port_name):
+def burn_watch(filepath, port_name):
     """"""
     print(f"beginning programming of {filepath} to device @ {port_name} and then will drop into monitor")
     sys.stdout.flush()
@@ -1037,10 +1007,93 @@ def en_jtag(port_name):
     port = serial.Serial(port=port_name, baudrate=BES_BAUD, timeout=30)
     bes = BESLink(port)
     bes.wait_for_sync()
-    bes.set_bootmode(0x40)
+    bes.set_bootmode(BESBootmodeTypes.JTAG_ENABLED.value)
     bes.reboot()
     bes.close_port()
     monitor(port_name)
+
+@cli.command()
+@click.argument("port_name")
+@click.option("-s/ ", "--sync/--no-sync", is_flag=True, default=True)
+@click.option("-f", "--force", is_flag=True)
+def run_programmer(port_name, sync, force):
+    """"""
+    print(f"Querying for info @ {port_name}")
+    sys.stdout.flush()
+    bes = BESLink(serial.Serial(port=port_name, baudrate=BES_BAUD, timeout=5))
+    bes.run_programmer(sync, force)
+    bes.close_port()
+
+@cli.command()
+@click.argument("port_name", default="COM6")
+@click.option("-s", "--sync", is_flag=True)
+def recovery(port_name, sync):
+    """ Reboot in recovery mode """
+    print(f"Reboot in recovery @ {port_name}")
+    sys.stdout.flush()
+    port = serial.Serial(port=port_name, baudrate=BES_BAUD, timeout=30)
+    bes = BESLink(port)
+    if sync:
+        bes.wait_for_sync()
+    bes.set_bootmode(BESBootmodeTypes.REBOOT_FROM_CRASH.value) # REBOOT_FROM_CRASH - skip booting APP from flash @0x80000
+    bes.reboot()
+    bes.close_port()
+    monitor(port_name)
+
+@cli.command()
+@click.argument("port_name", default="COM6")
+@click.option("-f", "--force", is_flag=True)
+def patch(port_name, force):
+    """ Patch Xiaomi L05B/C to skip login DSA signature verification """
+    print(f"Run patching @ {port_name}")
+    sys.stdout.flush()
+    port = serial.Serial(port=port_name, baudrate=BES_BAUD, timeout=30)
+    bes = BESLink(port)
+    bes.run_programmer()
+    # patch APP to skip login dsa verifying
+    # 0x2C1C0650: 4F F0 FF 30 (MOV.W R0, #0xFFFFFFFF) -> 4F F0 01 00 (MOV.W R0, #1)
+    orig = bytes([0x4F, 0xF0, 0xFF, 0x30])
+    patch = bytes([0x4F, 0xF0, 0x01, 0x00])
+    # patch = bytes([0xFF, 0xFF, 0xFF, 0xFF])
+    patch_v2 = bytes([0x01, 0x20, 0x01, 0x20]) # MOVS R0, #1; MOVS R0, #1
+    address = 0x2C1C0650
+    real = bes.read_chunk(address, 4)
+    # print(f"[{real.hex(" ")}] @ 0x{address:08x}")
+    if orig != real and not force:
+        if real == patch or real == patch_v2:
+            print(f"Already patched: [{real.hex(" ")}] @ 0x{address:08x}")
+        else:
+            print(f"Required pattern [{orig.hex(" ")}] @ 0x{address:08x} not found, current data is [{real.hex(" ")}], skip patching")
+    else:
+        print(f"Try to patch [{orig.hex()}] -> [{patch.hex()}] @ 0x{address:08x}")
+        bes.burn_short(address, patch)
+        real = bes.read_chunk(address, 4)
+        if real == patch:
+            print(f"OK: [{real.hex(" ")}] @ 0x{address:08x}")
+        else:
+            print(f"Fail: [{real.hex(" ")}] @ 0x{address:08x}")
+    bes.close_port()
+
+@cli.command()
+@click.argument("address")
+@click.argument("size")
+@click.argument("port_name", default="COM6")
+@click.option("-s", "--sync", is_flag=True)
+def md(port_name, address, size, sync):
+    """ Memory display """
+    print(f"Memory display {size} bytes @ {address} from device @ {port_name}")
+    sys.stdout.flush()
+    port = serial.Serial(port=port_name, baudrate=BES_BAUD, timeout=30)
+    bes = BESLink(port)
+    if sync:
+        bes.wait_for_sync()
+    address = atoi(address)
+    size = atoi(size)
+    if size > 0x100:
+        size = 0x100
+    data = bes.read_chunk(address, size)
+    print(f"0x{address:08x}: ", data.hex(" "))
+    bes.close_port()
 
 @cli.command()
 def list_ports():
@@ -1051,6 +1104,15 @@ def list_ports():
         print(port)
     sys.stdout.flush()
 
+def atoi(val) -> int:
+    if type(val) is str:
+            if str.lower(val[:2]) == "0x":
+                val = int(val, 16)
+            else:
+                val = int(val)
+    elif type(val) is not int:
+        raise Exception(f"atoi: unsupported type {(type(val))}")
+    return val
 
 if __name__ == "__main__":
     cli()
