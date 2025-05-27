@@ -60,37 +60,37 @@ class BESSysCmdTypes(Enum):
     GET_BOOTMODE    = 0xE3 # args: no, return 4 bytes.
 
 class BESBootmodeTypes(Enum):
-  WATCHDOG = 0x1
-  GLOBAL = 0x2
-  RTC = 0x4
-  CHARGER = 0x8
-  READ_ENABLED = 0x10
-  WRITE_ENABLED = 0x20
-  JTAG_ENABLED = 0x40
-  FORCE_USB_DLD = 0x80
-  FORCE_UART_DLD = 0x100
-  DLD_TRANS_UART = 0x200
-  SKIP_FLASH_BOOT = 0x400
-  CHIP_TEST = 0x800
-  FACTORY = 0x1000
-  CALIB = 0x2000
-  ROM_RESERVED_14 = 0x4000
-  FLASH_BOOT = 0x8000
-  REBOOT = 0x10000
-  ROM_RESERVED_17 = 0x20000
-  FORCE_USB_PLUG_IN = 0x40000
-  POWER_DOWN_WAKEUP = 0x80000
-#   TEST_MASK = 0x700000
-  TEST_MODE = 0x100000
-  TEST_SIGNALINGMODE = 0x200000
-  TEST_NOSIGNALINGMODE = 0x400000
-  ENTER_HIDE_BOOT = 0x800000
-  RESERVED_BIT24 = 0x1000000
-  REBOOT_FROM_CRASH = 0x2000000
-  CDC_COMM = 0x10000000
-  REBOOT_BT_ON = 0x20000000
-  REBOOT_ANC_ON = 0x40000000
-  LOCAL_PLAYER = 0x80000000
+  WATCHDOG              = 1 << 0
+  GLOBAL                = 1 << 1
+  RTC                   = 1 << 2
+  CHARGER               = 1 << 3
+  READ_ENABLED          = 1 << 4
+  WRITE_ENABLED         = 1 << 5
+  JTAG_ENABLED          = 1 << 6
+  FORCE_USB_DLD         = 1 << 7
+  FORCE_UART_DLD        = 1 << 8
+  DLD_TRANS_UART        = 1 << 9
+  SKIP_FLASH_BOOT       = 1 << 10
+  CHIP_TEST             = 1 << 11
+  FACTORY               = 1 << 12
+  CALIB                 = 1 << 13
+  ROM_RESERVED_14       = 1 << 14
+  FLASH_BOOT            = 1 << 15
+  REBOOT                = 1 << 16
+  ROM_RESERVED_17       = 1 << 17
+  FORCE_USB_PLUG_IN     = 1 << 18
+  POWER_DOWN_WAKEUP     = 1 << 19
+#   TEST_MASK             = 0x700000
+  TEST_MODE             = 1 << 20
+  TEST_SIGNALINGMODE    = 1 << 21
+  TEST_NOSIGNALINGMODE  = 1 << 22
+  ENTER_HIDE_BOOT       = 1 << 23
+  RESERVED_BIT24        = 1 << 24
+  REBOOT_FROM_CRASH     = 1 << 25
+  CDC_COMM              = 1 << 28
+  REBOOT_BT_ON          = 1 << 29
+  REBOOT_ANC_ON         = 1 << 30
+  LOCAL_PLAYER          = 1 << 31
 
 def bootmode_to_string(mode) -> str:
     mode = atoi(mode)
@@ -334,41 +334,6 @@ class BESLink:
                 break
 
     @classmethod
-    def run_get_cfgdata(cls):
-        """
-        No idea what this is for yet
-        """
-        exit_time = datetime.now() + timedelta(seconds=30)
-
-        msg_sys_poll_1 = [
-            0xBE,
-            BESMessageTypes.BULK_READ.value,
-            0x05,
-            0x08,
-            0x00, 0xE0, 0x0F, 0x3C, # read from 0x3C0FE000 (flash offset 0xFE000) (why? there is nothing. should be 0xFFE000 in for some data from bes_reserved?)
-            0x00, 0x10, 0x00, 0x00, # size 0x1000
-            0xF6
-        ]
-        cls._write_paket_raw(msg_sys_poll_1)
-
-        time.sleep(0.1)
-        cls.serial_port.reset_input_buffer()
-
-        msg_sys_poll_2 = [
-            0xBE,
-            0x03,
-            0x06,
-            0x08,
-            0x00, 0xF0, 0x0F, 0x3C, # read at 0x3C0FF000 (flash offset 0xFF000) (why? factory is located at 0xFFF000)
-            0x00, 0x10, 0x00, 0x00,
-            0xE5
-        ]
-        cls._write_paket_raw(msg_sys_poll_2)
-
-        time.sleep(0.1)
-        cls.serial_port.reset_input_buffer()
-
-    @classmethod
     def program_binary_file(cls, filename: str):
         """
         Load the provided program in at the default locations
@@ -447,13 +412,7 @@ class BESLink:
         print("Sending done; sending commit")
         sys.stdout.flush()
         # Now send the final commit message - it writes magic value at flash header marking flash as containing valid firmware
-        commit_msg = [
-            0x1C,
-            0xEC,
-            0x57,
-            0xBE,
-        ]
-        cls.burn_data_short(burn_addr, commit_msg)
+        cls.burn_data_short(burn_addr, struct.pack("<I", 0xBE57EC1C))
     
     @classmethod
     def burn_short(cls, burn_addr, burn_data:bytearray):
@@ -653,47 +612,6 @@ class BESLink:
         raise Exception("Timeout waiting for programming ack")
 
     @classmethod
-    def _create_burn_data_message(cls, sequence: int, data_payload: bytearray) -> bytearray:
-        """
-        Creates the ready-to-send message to burn this chunk of data
-        """
-        chunk_size = len(data_payload)
-        if chunk_size != 0x8000 and chunk_size != 0x1000:
-            raise Exception("Size not supported")
-        template = [
-            0xBE,
-            0x62,
-            0xC1,
-            0x0B,
-            0x00,
-            0x80,
-            0x00,
-            0x00,
-            0xAB,
-            0x77,
-            0x7F,
-            0xF4,
-            0x00,
-            0x00,
-            0x00,
-            0xFE,
-        ]
-        template[2] = 0xC1 + sequence
-        template[4] = chunk_size & 0xFF
-        template[5] = (chunk_size >> 8) & 0xFF
-        crc32_of_chunk = zlib.crc32(data_payload)
-        template[8] = (crc32_of_chunk >> 0) & 0xFF
-        template[9] = (crc32_of_chunk >> 8) & 0xFF
-        template[10] = (crc32_of_chunk >> 16) & 0xFF
-        template[11] = (crc32_of_chunk >> 24) & 0xFF
-        template[12] = sequence
-        template[15] = cls._calculate_message_checksum(template[0:-1])
-        print("Tx H", bytes(template).hex(","))
-        sys.stdout.flush()
-        template.extend(data_payload)
-        return template
-
-    @classmethod
     def _send_burn_data_message(cls, sequence: int, data_payload: bytearray) -> bytearray:
         """
         Send message to burn this chunk of data
@@ -769,7 +687,6 @@ class BESLink:
     @classmethod
     def _lookup_packet_length(cls, packet_id1: bytes, packet_id2: bytes):
         """
-        Since they do not encode the length into the packet; we need to look them up manually
         This only stores the expected lengths for the messages coming from the MCU; for outgoing Tx messages that is left up to the sender functions
         """
 
