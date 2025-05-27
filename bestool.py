@@ -193,7 +193,7 @@ class BESLink:
             state = BESLink.wait_for_sync()
         # print(f"state {state}")
         if force or state != "programmer running":
-            BESLink.load_code_blob("./payload/programmer2001.code.bin")
+            BESLink.load_code_blob("./payload/programmer2001.bin")
 
     @classmethod
     def load_code_blob(cls, payload_file):
@@ -203,17 +203,30 @@ class BESLink:
         exit_time = datetime.now() + timedelta(seconds=30)
         # code_addr & 0x3 == 0 && code_len > 0 && code_addr >= 0x20001950 && code_len + code_addr < 0x2003F000
 
-        #TODO: autodetect payload is raw or formatted by checking header
-        # with open("../romdumper/main.bin", "r+b") as f:
         with open(payload_file, "r+b") as f:
             code_payload = f.read()
             f.close()
 
-            # address = 0x20002000
-            entry, param, sp, address = struct.unpack("<IIII", code_payload[0:16])
+            entry, = struct.unpack("<I", code_payload[0:4])
+            # print(f"entry 0x{entry:08x}")
             if entry == 0xBE57EC1C:
-                raise Exception("Use payload from formatted code file is not supported yet")
+                security, version,_, build_info_addr = struct.unpack("<HHII", code_payload[4:16])
+                if version == 0 or version == 2:
+                    code_offset = 0x41C
+                elif version == 4:
+                    code_offset = 0x61C
+                else:
+                    raise Exception(f"Unsupported programmer file format version {version}")
+                dst_addr, = struct.unpack("<I", code_payload[-4:])
+                code_payload = code_payload[code_offset:-4]
+                build_info = code_payload[build_info_addr - dst_addr:].decode('utf-8')
+                print(f"Header info: security {security}, version {version}, build {build_info}, code load address 0x{dst_addr:08x}")
+            
             size = len(code_payload)
+            entry, param, sp, address = struct.unpack("<IIII", code_payload[0:16])
+
+            if dst_addr is not None and dst_addr != address:
+                raise Exception("Code load address from footer 0x{dst_addr:08x} != 0x{address} from header")
 
             crc = zlib.crc32(code_payload)
 
@@ -833,7 +846,7 @@ def sync(port_name):
 
 @cli.command()
 @click.argument("port_name")
-@click.option("-p", "--payload", default="./payload/programmer2001.code.bin")
+@click.option("-p", "--payload", default="./payload/programmer2001.bin")
 @click.option("-f", "--force", is_flag=True)
 # @click.option("--force", "force")
 def code(port_name, payload, force):
