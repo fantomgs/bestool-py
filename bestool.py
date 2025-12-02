@@ -14,6 +14,8 @@ import struct
 
 __author__ = "Ben V. Brown (ext. by Fan Tom G.S.)"
 BES_BAUD = 921600
+FLASH_START = 0x2C000000
+BURN_OFFSET = 0x00080000
 
 # send at msg_type
 class BESMessageTypes(Enum):
@@ -339,7 +341,7 @@ class BESLink:
         Load the provided program in at the default locations
 
         """
-        cls.program_raw_binary_file(0x80000, filename)
+        cls.program_raw_binary_file(BURN_OFFSET, filename)
     
     @classmethod
     def program_raw_binary_file(cls, flash_offset, filename: str):
@@ -363,7 +365,7 @@ class BESLink:
             packed_file = packed_file + bytes(padding)
 
         burn_len = len(packed_file)
-        burn_addr = 0x2C000000 + flash_offset
+        burn_addr = FLASH_START + flash_offset
         data = bytearray()
         data.extend(struct.pack("<I", burn_addr))
         data.extend(struct.pack("<I", burn_len))
@@ -788,6 +790,7 @@ def info(port_name):
     BESLink.read_flash_info()
     bes.close_port()
 
+# TODO: add address and offset arguments
 @cli.command()
 @click.argument("filepath")
 @click.option("-p", "--port", is_flag=False, default="/dev/ttyS6")
@@ -795,6 +798,8 @@ def info(port_name):
 # @click.option("-s", "--size")
 def burn(filepath, port):
     """"""
+    print("NOT IMPLEMENTED")
+    return
     print(f"beginning programming of {filepath} to device @ {port}")
     sys.stdout.flush()
     if port == None:
@@ -809,7 +814,7 @@ def burn(filepath, port):
     BESLink.program_binary_file(port, filepath, address, size)
     port.close()
 
-
+# TODO: add address and offset arguments
 @cli.command()
 @click.argument("filepath")
 @click.argument("port_name")
